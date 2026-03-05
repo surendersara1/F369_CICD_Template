@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Architecture Map Schema",
+  "description": "JSON-compatible schema for the ARCHITECTURE_MAP.md output from Pass 1",
+  "type": "object",
+  "required": ["project", "environments", "microservices", "layers", "environments_matrix"],
+  "properties": {
+    "project": {
+      "type": "object",
+      "required": ["name", "description", "scale", "source_sow"],
+      "properties": {
+        "name": { "type": "string", "description": "Project identifier (used for resource naming, kebab-case)" },
+        "description": { "type": "string", "description": "2-3 sentence project summary" },
+        "scale": { "type": "string", "enum": ["small", "medium", "large"] },
+        "source_sow": { "type": "string", "description": "SOW filename or identifier" },
+        "aws_region": { "type": "string", "default": "us-east-1" },
+        "aws_account": { "type": "string", "default": "REPLACE_WITH_ACCOUNT_ID" },
+        "compliance": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["HIPAA", "SOC2", "PCI-DSS", "GDPR", "FedRAMP", "ISO27001"] }
+        }
+      }
+    },
+    "environments": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["dev", "staging", "prod"] },
+      "minItems": 1
+    },
+    "source_control": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string", "enum": ["codecommit", "github", "gitlab", "bitbucket"], "default": "codecommit" },
+        "repo_name": { "type": "string" },
+        "main_branch": { "type": "string", "default": "main" }
+      }
+    },
+    "microservices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "purpose", "trigger_type", "long_running"],
+        "properties": {
+          "id": { "type": "string", "description": "PascalCase identifier for CDK resource ID" },
+          "name": { "type": "string", "description": "kebab-case service name" },
+          "purpose": { "type": "string" },
+          "trigger_type": { "type": "string", "enum": ["api_gateway", "sqs", "eventbridge", "sns", "s3", "kinesis", "dynamodb_stream", "none"] },
+          "http_method": { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", null] },
+          "http_path": { "type": "string" },
+          "data_stores": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "long_running": { "type": "boolean", "description": "If true, use ECS Fargate instead of Lambda" },
+          "schedule": { "type": "string", "description": "EventBridge cron expression if scheduled" },
+          "memory_mb": { "type": "integer", "default": 512 },
+          "timeout_seconds": { "type": "integer", "default": 29 }
+        }
+      }
+    },
+    "layers": {
+      "type": "object",
+      "properties": {
+        "L0_networking": { "$ref": "#/definitions/layerComponents" },
+        "L1_security": { "$ref": "#/definitions/layerComponents" },
+        "L2_data": { "$ref": "#/definitions/layerComponents" },
+        "L3_backend": { "$ref": "#/definitions/layerComponents" },
+        "L4_api": { "$ref": "#/definitions/layerComponents" },
+        "L5_frontend": { "$ref": "#/definitions/layerComponents" },
+        "L6_observability": { "$ref": "#/definitions/layerComponents" },
+        "L7_cicd": { "$ref": "#/definitions/layerComponents" }
+      }
+    },
+    "data_entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "store", "pk"],
+        "properties": {
+          "name": { "type": "string" },
+          "store": { "type": "string", "enum": ["aurora", "dynamodb", "s3", "elasticache", "opensearch"] },
+          "pk": { "type": "string" },
+          "sk": { "type": "string" },
+          "key_attributes": { "type": "array", "items": { "type": "string" } },
+          "access_patterns": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "environments_matrix": {
+      "type": "object",
+      "description": "Key resource configuration per environment",
+      "properties": {
+        "aurora_min_acu": { "$ref": "#/definitions/envValues" },
+        "aurora_max_acu": { "$ref": "#/definitions/envValues" },
+        "lambda_memory_mb": { "$ref": "#/definitions/envValues" },
+        "lambda_reserved_concurrency": { "$ref": "#/definitions/envValues" },
+        "ecs_cpu": { "$ref": "#/definitions/envValues" },
+        "ecs_memory_mb": { "$ref": "#/definitions/envValues" },
+        "cloudfront_price_class": { "$ref": "#/definitions/envValues" },
+        "waf_mode": { "$ref": "#/definitions/envValues" },
+        "multi_az_nat": { "$ref": "#/definitions/envValues" },
+        "deletion_policy": { "$ref": "#/definitions/envValues" },
+        "log_retention_days": { "$ref": "#/definitions/envValues" }
+      }
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+          "description": { "type": "string" },
+          "sow_reference": { "type": "string" },
+          "recommendation": { "type": "string" }
+        }
+      }
+    },
+    "cdk_imports": {
+      "type": "array",
+      "description": "List of aws-cdk-lib modules needed",
+      "items": { "type": "string" }
+    }
+  },
+  "definitions": {
+    "layerComponents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["aws_service", "cdk_construct", "justification"],
+        "properties": {
+          "aws_service": { "type": "string" },
+          "cdk_construct": { "type": "string" },
+          "config_dev": { "type": "object" },
+          "config_prod": { "type": "object" },
+          "justification": { "type": "string" },
+          "included": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    "envValues": {
+      "type": "object",
+      "properties": {
+        "dev": {},
+        "staging": {},
+        "prod": {}
+      }
+    }
+  }
+}
