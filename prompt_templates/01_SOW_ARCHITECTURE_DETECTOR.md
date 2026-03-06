@@ -182,15 +182,18 @@ List any ambiguities or decisions that need human input:
 Based on detected components, the following CDK imports will be needed:
 ```python
 from aws_cdk import (
-    Stack, Stage, CfnOutput, Duration, RemovalPolicy, Tags,
+    Stack, Stage, CfnOutput, Duration, RemovalPolicy, Tags, Fn,
+    CustomResource,
     aws_ec2 as ec2,
     aws_iam as iam,
     aws_kms as kms,
     aws_secretsmanager as sm,
+    aws_ssm as ssm,
     aws_rds as rds,
     aws_dynamodb as ddb,
     aws_s3 as s3,
     aws_s3_deployment as s3deploy,
+    aws_s3_notifications as s3n,
     aws_lambda as _lambda,
     aws_lambda_event_sources as lambda_events,
     aws_ecs as ecs,
@@ -203,13 +206,42 @@ from aws_cdk import (
     aws_cognito as cognito,
     aws_cloudfront as cf,
     aws_cloudfront_origins as cf_origins,
-    aws_wafv2 as waf,
+    aws_wafv2 as wafv2,
     aws_cloudwatch as cw,
     aws_cloudwatch_actions as cw_actions,
     aws_logs as logs,
     aws_xray as xray,
     aws_route53 as r53,
     aws_certificatemanager as acm,
+    aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as sfn_tasks,
+    aws_kinesis as kinesis,
+    aws_glue as glue,
+    aws_athena as athena,
+    aws_backup as backup,
+    aws_config as config,
+    aws_cloudtrail as cloudtrail,
+    aws_guardduty as guardduty,
+    aws_inspector as inspector,
+    aws_macie as macie,
+    aws_securityhub as securityhub,
+    aws_networkfirewall as networkfirewall,
+    aws_globalaccelerator as ga,
+    aws_shield as shield,
+    # MLOps / SageMaker
+    aws_sagemaker as sagemaker,
+    # Streaming
+    aws_msk as msk,
+    aws_kinesis as kinesis,
+    # Container Platform
+    aws_eks as eks,
+    # Observability
+    aws_aps as aps,
+    aws_grafana as grafana,
+    aws_rum as rum,
+    # LLMOps
+    aws_bedrock as bedrock,
+    # CICD
     pipelines,
     aws_codecommit as codecommit,
     aws_codebuild as codebuild,
@@ -232,7 +264,7 @@ Claude uses these rules when analyzing the SOW:
 ```
 
 "user login / authentication / JWT" → Cognito User Pool + Identity Pool
-"file storage / upload / download" → S3 + Lambda trigger + CloudFront signed URLs  
+"file storage / upload / download" → S3 + Lambda trigger + CloudFront signed URLs
 "real-time updates / live data" → API Gateway WebSocket OR AppSync subscriptions
 "background processing / async jobs" → SQS + Lambda OR SQS + ECS Fargate (if >15min)
 "scheduled tasks / cron" → EventBridge Scheduler + Lambda
@@ -242,11 +274,43 @@ Claude uses these rules when analyzing the SOW:
 "email notifications" → Amazon SES + SNS
 "SMS / push notifications" → Amazon SNS
 "workflow / saga / orchestration" → Step Functions
-"ML inference / AI" → SageMaker Endpoint OR Bedrock
-"third-party webhooks / integrations" → API Gateway + EventBridge
 "reporting / analytics / BI" → Athena + Glue + S3 + QuickSight
 "audit logs / compliance" → CloudTrail + Config + GuardDuty
+
+--- MLOps / Data Science ---
+"data lake / raw data / feature engineering" → MLOPS_DATA_PLATFORM.md (S3 4-zone + Glue + Athena)
+"data warehouse / Redshift / BI dashboards" → MLOPS_DATA_PLATFORM.md (Redshift Serverless)
+"large-scale ETL / Spark / PySpark" → MLOPS_DATA_PLATFORM.md (EMR Serverless)
+"train ML model / SageMaker Pipelines" → MLOPS_SAGEMAKER_TRAINING.md (Studio + Feature Store)
+"ML inference / model endpoint" → MLOPS_SAGEMAKER_SERVING.md (real-time + auto-scaling)
+"LLM fine-tuning / LoRA / QLoRA / Llama / Mistral" → MLOPS_PIPELINE_LLM_FINETUNING.md
+"NLP / BERT / text classification / NER / sentiment" → MLOPS_PIPELINE_NLP_HUGGINGFACE.md
+"real-time fraud / <100ms scoring / Feature Store" → MLOPS_PIPELINE_FRAUD_REALTIME.md
+"time series / demand forecast / DeepAR / Prophet" → MLOPS_PIPELINE_TIMESERIES.md
+"computer vision / image detection / YOLOv8 / OCR" → MLOPS_PIPELINE_COMPUTER_VISION.md
+"recommendations / collaborative filtering / personalization" → MLOPS_PIPELINE_RECOMMENDATIONS.md
+"100 models / 1 model per tenant / SaaS ML" → MLOPS_MULTI_MODEL_ENDPOINT.md
+"batch scoring / nightly predictions / offline ML" → MLOPS_BATCH_TRANSFORM.md
+"SHAP / explainability / bias / EU AI Act" → MLOPS_CLARIFY_EXPLAINABILITY.md
+"data labeling / annotation / active learning" → MLOPS_GROUND_TRUTH.md
+
+--- LLMOps ---
+"LLM / Bedrock / generative AI / chatbot" → LLMOPS_BEDROCK.md (Bedrock API + Guardrails + Gateway)
+"RAG / document Q&A / knowledge base" → LLMOPS_BEDROCK.md (Knowledge Bases + OpenSearch)
+"AI agent / agentic / multi-step AI" → LLMOPS_BEDROCK.md (Bedrock Agents)
 "multi-region / disaster recovery" → Route53 + Global Accelerator + S3 CRR
+
+--- Enterprise Security ---
+"WAF / bot protection / DDoS / OWASP" → SECURITY_WAF_SHIELD_MACIE.md (WAF v2 + Shield)
+"network firewall / IDS / IPS / egress filtering" → SECURITY_WAF_SHIELD_MACIE.md (Network Firewall)
+"PII scanning / PHI in S3 / data classification" → SECURITY_WAF_SHIELD_MACIE.md (Macie)
+"HIPAA / PCI DSS / SOC2 / FedRAMP" → COMPLIANCE_HIPAA_PCIDSS.md
+"multi-region / active-active / <1 min RTO" → GLOBAL_MULTI_REGION.md
+
+--- Startup / SaaS Platform ---
+"Kubernetes / K8s / EKS / Helm / GitOps" → PLATFORM_EKS_CLUSTER.md
+"Apache Kafka / MSK / Schema Registry" → DATA_MSK_KAFKA.md
+"Prometheus / Grafana / OpenTelemetry / SLO" → OBS_OPENTELEMETRY_GRAFANA.md
 
 ```
 

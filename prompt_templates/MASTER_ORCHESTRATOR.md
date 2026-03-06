@@ -159,40 +159,68 @@ Use the project name extracted from the SOW for all naming.
 
 Use this table to decide which AWS services to include based on SOW keywords:
 
-| SOW Keyword/Pattern                                  | AWS Services to Include                        | Partial File                                |
-| ---------------------------------------------------- | ---------------------------------------------- | ------------------------------------------- |
-| "REST API", "HTTP endpoints"                         | API Gateway (REST), Lambda, Cognito            | `LAYER_API.md`                              |
-| "GraphQL", "real-time subscriptions"                 | AppSync, DynamoDB                              | `LAYER_API_APPSYNC.md`                      |
-| "real-time", "websocket", "live updates"             | AppSync Subscriptions OR API GW WebSocket      | `LAYER_API_APPSYNC.md`                      |
-| "authentication", "login", "MFA"                     | Cognito User Pool + Identity Pool              | `LAYER_API.md`                              |
-| "file upload", "documents", "media"                  | S3, Lambda trigger, CloudFront signed URLs     | `LAYER_DATA.md`, `EVENT_DRIVEN_PATTERNS.md` |
-| "background jobs", "heavy processing", ">15min"      | ECS Fargate, SQS                               | `LAYER_BACKEND_ECS.md`                      |
-| "workflow", "multi-step", "approval in process"      | Step Functions                                 | `WORKFLOW_STEP_FUNCTIONS.md`                |
-| "saga", "compensating transaction", "rollback logic" | Step Functions (Standard)                      | `WORKFLOW_STEP_FUNCTIONS.md`                |
-| "scheduled", "cron", "nightly batch"                 | EventBridge Scheduler, Lambda                  | `LAYER_BACKEND_LAMBDA.md`                   |
-| "event-driven", "domain events", "pub/sub"           | SNS → SQS fan-out                              | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "ordered processing", "exactly-once", "FIFO"         | SQS FIFO                                       | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "streaming", "high-throughput events", ">1k/sec"     | Kinesis Data Streams + Firehose                | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "event bus", "microservice events", "routing rules"  | EventBridge Custom Bus                         | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "file arrives → trigger", "S3 processing pipeline"   | S3 Event Notifications → EventBridge/SQS       | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "DynamoDB change", "change data capture", "CDC"      | DynamoDB Streams → Lambda                      | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "relational", "SQL", "transactions", "ACID"          | Aurora Serverless V2 (PostgreSQL)              | `LAYER_DATA.md`                             |
-| "NoSQL", "key-value", "session", "metadata"          | DynamoDB                                       | `LAYER_DATA.md`                             |
-| "search", "full-text", "faceted"                     | OpenSearch Service                             | `LAYER_DATA.md`                             |
-| "cache", "low latency", "session store"              | ElastiCache Redis                              | `LAYER_DATA.md`                             |
-| "email", "transactional email"                       | SES + SNS                                      | `LAYER_OBSERVABILITY.md`                    |
-| "decouple", "async", "queue"                         | SQS (Standard + DLQ)                           | `LAYER_DATA.md`                             |
-| "ML", "AI", "inference", "Bedrock"                   | SageMaker Endpoint OR Bedrock API via Lambda   | `LAYER_BACKEND_LAMBDA.md`                   |
-| "frontend", "web app", "React", "Next.js"            | S3 + CloudFront + WAF + OAI                    | `LAYER_FRONTEND.md`                         |
-| "mobile", "iOS", "Android"                           | API Gateway, Cognito, AppSync                  | `LAYER_API_APPSYNC.md`                      |
-| "reporting", "analytics", "BI", "Athena"             | Athena + Glue + S3 data lake + Firehose        | `EVENT_DRIVEN_PATTERNS.md`                  |
-| "compliance", "audit", "HIPAA", "SOC2"               | Config Rules + CloudTrail + GuardDuty + Backup | `OPS_ADVANCED_MONITORING.md`                |
-| "synthetic monitoring", "canary", "SLA check"        | CloudWatch Synthetics                          | `OPS_ADVANCED_MONITORING.md`                |
-| "backup", "recovery", "RTO/RPO"                      | AWS Backup centralized policy                  | `OPS_ADVANCED_MONITORING.md`                |
-| "cost governance", "budget alert", "spend spike"     | Cost Anomaly Detection                         | `OPS_ADVANCED_MONITORING.md`                |
-| "config values", "feature flags", "app settings"     | SSM Parameter Store                            | `OPS_ADVANCED_MONITORING.md`                |
-| "multi-region", "DR", "failover", "global"           | Route53 + Global Accelerator + S3 CRR          | `LAYER_NETWORKING.md`                       |
-| "third-party API", "webhook", "integration"          | EventBridge + Lambda + Secrets Manager         | `EVENT_DRIVEN_PATTERNS.md`                  |
+| SOW Keyword/Pattern                                         | AWS Services to Include                              | Partial File                                |
+| ----------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------- |
+| "REST API", "HTTP endpoints"                                | API Gateway (REST), Lambda, Cognito                  | `LAYER_API.md`                              |
+| "GraphQL", "real-time subscriptions"                        | AppSync, DynamoDB                                    | `LAYER_API_APPSYNC.md`                      |
+| "real-time", "websocket", "live updates"                    | AppSync Subscriptions OR API GW WebSocket            | `LAYER_API_APPSYNC.md`                      |
+| "authentication", "login", "MFA"                            | Cognito User Pool + Identity Pool                    | `LAYER_API.md`                              |
+| "file upload", "documents", "media"                         | S3, Lambda trigger, CloudFront signed URLs           | `LAYER_DATA.md`, `EVENT_DRIVEN_PATTERNS.md` |
+| "background jobs", "heavy processing", ">15min"             | ECS Fargate, SQS                                     | `LAYER_BACKEND_ECS.md`                      |
+| "workflow", "multi-step", "approval in process"             | Step Functions                                       | `WORKFLOW_STEP_FUNCTIONS.md`                |
+| "saga", "compensating transaction", "rollback logic"        | Step Functions (Standard)                            | `WORKFLOW_STEP_FUNCTIONS.md`                |
+| "scheduled", "cron", "nightly batch"                        | EventBridge Scheduler, Lambda                        | `LAYER_BACKEND_LAMBDA.md`                   |
+| "event-driven", "domain events", "pub/sub"                  | SNS → SQS fan-out                                    | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "ordered processing", "exactly-once", "FIFO"                | SQS FIFO                                             | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "streaming", "high-throughput events", ">1k/sec"            | Kinesis Data Streams + Firehose                      | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "event bus", "microservice events", "routing rules"         | EventBridge Custom Bus                               | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "file arrives → trigger", "S3 processing pipeline"          | S3 Event Notifications → EventBridge/SQS             | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "DynamoDB change", "change data capture", "CDC"             | DynamoDB Streams → Lambda                            | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "relational", "SQL", "transactions", "ACID"                 | Aurora Serverless V2 (PostgreSQL)                    | `LAYER_DATA.md`                             |
+| "NoSQL", "key-value", "session", "metadata"                 | DynamoDB                                             | `LAYER_DATA.md`                             |
+| "search", "full-text", "faceted"                            | OpenSearch Service                                   | `LAYER_DATA.md`                             |
+| "cache", "low latency", "session store"                     | ElastiCache Redis                                    | `LAYER_DATA.md`                             |
+| "email", "transactional email"                              | SES + SNS                                            | `LAYER_OBSERVABILITY.md`                    |
+| "decouple", "async", "queue"                                | SQS (Standard + DLQ)                                 | `LAYER_DATA.md`                             |
+| "frontend", "web app", "React", "Next.js"                   | S3 + CloudFront + WAF + OAI                          | `LAYER_FRONTEND.md`                         |
+| "mobile", "iOS", "Android"                                  | API Gateway, Cognito, AppSync                        | `LAYER_API_APPSYNC.md`                      |
+| "reporting", "analytics", "BI", "Athena"                    | Athena + Glue + S3 data lake + Firehose              | `EVENT_DRIVEN_PATTERNS.md`                  |
+| "synthetic monitoring", "canary", "SLA check"               | CloudWatch Synthetics                                | `OPS_ADVANCED_MONITORING.md`                |
+| "backup", "recovery", "RTO/RPO"                             | AWS Backup centralized policy                        | `OPS_ADVANCED_MONITORING.md`                |
+| "cost governance", "budget alert", "spend spike"            | Cost Anomaly Detection                               | `OPS_ADVANCED_MONITORING.md`                |
+| "third-party API", "webhook", "integration"                 | EventBridge + Lambda + Secrets Manager               | `EVENT_DRIVEN_PATTERNS.md`                  |
+| **— MLOps / Data Science —**                                |                                                      |                                             |
+| "data lake", "feature engineering", "Glue", "Iceberg"       | S3 4-zone lake + Glue ETL + Athena + Lake Formation  | `MLOPS_DATA_PLATFORM.md`                    |
+| "data warehouse", "Redshift", "BI", "analysts"              | Redshift Serverless + Glue catalog                   | `MLOPS_DATA_PLATFORM.md`                    |
+| "train model", "SageMaker Pipelines", "ML pipeline"         | SageMaker Studio + Feature Store + Model Registry    | `MLOPS_SAGEMAKER_TRAINING.md`               |
+| "model deployment", "inference endpoint", "real-time score" | SageMaker endpoint + auto-scaling + blue-green       | `MLOPS_SAGEMAKER_SERVING.md`                |
+| "model drift", "data drift", "model monitor"                | SageMaker Model Monitor + retrain trigger            | `MLOPS_SAGEMAKER_SERVING.md`                |
+| "LLM fine-tuning", "LoRA", "QLoRA", "PEFT", "Llama"         | SageMaker GPU training + HuggingFace DLC             | `MLOPS_PIPELINE_LLM_FINETUNING.md`          |
+| "NLP", "text classification", "NER", "sentiment", "BERT"    | HuggingFace Transformers on SageMaker                | `MLOPS_PIPELINE_NLP_HUGGINGFACE.md`         |
+| "fraud detection", "real-time scoring", "<100ms"            | Feature Store online + XGBoost + FIFO queue          | `MLOPS_PIPELINE_FRAUD_REALTIME.md`          |
+| "time series", "demand forecast", "DeepAR", "Prophet"       | SageMaker DeepAR/Chronos + daily forecast Lambda     | `MLOPS_PIPELINE_TIMESERIES.md`              |
+| "computer vision", "image detection", "YOLOv8", "OCR"       | GPU endpoint + async inference + SageMaker           | `MLOPS_PIPELINE_COMPUTER_VISION.md`         |
+| "recommendations", "collaborative filtering", "Two-Tower"   | Two-Tower model + DynamoDB pre-computed + re-ranking | `MLOPS_PIPELINE_RECOMMENDATIONS.md`         |
+| "100 models", "one model per tenant", "SaaS ML"             | SageMaker Multi-Model Endpoint                       | `MLOPS_MULTI_MODEL_ENDPOINT.md`             |
+| "batch scoring", "offline predictions", "nightly ML"        | SageMaker Batch Transform + S3 trigger               | `MLOPS_BATCH_TRANSFORM.md`                  |
+| "data labeling", "annotation", "Ground Truth"               | SageMaker Ground Truth + private workforce           | `MLOPS_GROUND_TRUTH.md`                     |
+| "SHAP", "explainability", "bias detection", "fairness"      | SageMaker Clarify + Macie + 7yr audit bucket         | `MLOPS_CLARIFY_EXPLAINABILITY.md`           |
+| **— LLMOps —**                                              |                                                      |                                             |
+| "LLM", "generative AI", "chatbot", "Claude", "Bedrock"      | Bedrock API + Guardrails + LLM Gateway Lambda        | `LLMOPS_BEDROCK.md`                         |
+| "RAG", "document Q&A", "knowledge base", "retrieval"        | Bedrock Knowledge Bases + OpenSearch vector store    | `LLMOPS_BEDROCK.md`                         |
+| "AI agent", "agentic", "multi-step AI", "tool use"          | Bedrock Agents + action group Lambda                 | `LLMOPS_BEDROCK.md`                         |
+| "PII in LLM", "content filtering", "safe AI"                | Bedrock Guardrails (PII redaction + topic blocking)  | `LLMOPS_BEDROCK.md`                         |
+| **— Enterprise Security —**                                 |                                                      |                                             |
+| "WAF", "bot protection", "DDoS", "OWASP", "rate limiting"   | WAF v2 managed rules + Shield Advanced               | `SECURITY_WAF_SHIELD_MACIE.md`              |
+| "network firewall", "intrusion detection", "IDS/IPS"        | AWS Network Firewall + domain allowlist              | `SECURITY_WAF_SHIELD_MACIE.md`              |
+| "PII scanning", "PHI in S3", "data classification"          | Amazon Macie + Security Hub                          | `SECURITY_WAF_SHIELD_MACIE.md`              |
+| "HIPAA", "PCI DSS", "SOC2", "FedRAMP", "compliance audit"   | WORM trail + Config rules + Backup vault lock        | `COMPLIANCE_HIPAA_PCIDSS.md`                |
+| "multi-region", "active-active", "global DR", "<1min RTO"   | Global Accelerator + Aurora Global + DynamoDB Global | `GLOBAL_MULTI_REGION.md`                    |
+| **— Startup / SaaS Platform —**                             |                                                      |                                             |
+| "Kubernetes", "K8s", "EKS", "Helm", "GitOps", "ArgoCD"      | EKS + Karpenter + LBC + External Secrets Operator    | `PLATFORM_EKS_CLUSTER.md`                   |
+| "Apache Kafka", "MSK", "Schema Registry", "exactly-once"    | Amazon MSK + Glue Schema Registry (Avro)             | `DATA_MSK_KAFKA.md`                         |
+| "Prometheus", "Grafana", "OpenTelemetry", "OTEL", "traces"  | AMP + Managed Grafana + ADOT Lambda layer            | `OBS_OPENTELEMETRY_GRAFANA.md`              |
+| "SLO", "error budget", "real user monitoring", "RUM"        | CloudWatch RUM + SLO dashboard + Alertmanager        | `OBS_OPENTELEMETRY_GRAFANA.md`              |
 
 ---
 
@@ -200,33 +228,47 @@ Use this table to decide which AWS services to include based on SOW keywords:
 
 When generating code, include these partials based on SOW detection:
 
-| Partial                      | Layer | Include When                                   |
-| ---------------------------- | ----- | ---------------------------------------------- |
-| `LAYER_NETWORKING.md`        | L0    | Always                                         |
-| `LAYER_SECURITY.md`          | L1    | Always                                         |
-| `LAYER_DATA.md`              | L2    | Always (at minimum: S3 + DynamoDB)             |
-| `LAYER_BACKEND_LAMBDA.md`    | L3A   | Always (at minimum: 1 Lambda)                  |
-| `LAYER_BACKEND_ECS.md`       | L3B   | Long-running tasks detected                    |
-| `EVENT_DRIVEN_PATTERNS.md`   | L2/L3 | async, decoupling, events, streaming detected  |
-| `WORKFLOW_STEP_FUNCTIONS.md` | L3    | multi-step workflows, approvals, saga detected |
-| `LAYER_API.md`               | L4    | REST API detected                              |
-| `LAYER_API_APPSYNC.md`       | L4    | GraphQL OR real-time subscriptions detected    |
-| `LAYER_FRONTEND.md`          | L5    | Frontend/web app detected                      |
-| `LAYER_OBSERVABILITY.md`     | L6    | Always                                         |
-| `OPS_ADVANCED_MONITORING.md` | L6+   | compliance, backup, canary, cost monitoring    |
-| `CICD_PIPELINE_STAGES.md`    | L7    | Always                                         |
-
----
-
-## OUTPUT FORMAT REQUIREMENTS
-
-All generated code MUST include:
-
-1. **File header comment** with: filename, description, generated date, SOW reference
-2. **Section dividers** (# === SECTION NAME ===) for each layer
-3. **Inline comments** explaining non-obvious CDK patterns
-4. **Type hints** on all Python functions
-5. **No hardcoded values** — all configs via environment variables or CDK context
+| Partial                                  | Layer      | Include When                                              |
+| ---------------------------------------- | ---------- | --------------------------------------------------------- |
+| **— Core (Always) —**                    |            |                                                           |
+| `LAYER_NETWORKING.md`                    | L0         | Always                                                    |
+| `LAYER_SECURITY.md`                      | L1         | Always                                                    |
+| `LAYER_DATA.md`                          | L2         | Always (at minimum: S3 + DynamoDB)                        |
+| `LAYER_BACKEND_LAMBDA.md`                | L3A        | Always (at minimum: 1 Lambda)                             |
+| `LAYER_OBSERVABILITY.md`                 | L6         | Always                                                    |
+| `CICD_PIPELINE_STAGES.md`                | L7         | Always                                                    |
+| **— Conditional App Layers —**           |            |                                                           |
+| `LAYER_BACKEND_ECS.md`                   | L3B        | Long-running tasks (>15min) detected                      |
+| `EVENT_DRIVEN_PATTERNS.md`               | L2/L3      | async, decoupling, events, streaming detected             |
+| `WORKFLOW_STEP_FUNCTIONS.md`             | L3         | multi-step workflows, approvals, saga detected            |
+| `LAYER_API.md`                           | L4         | REST API detected                                         |
+| `LAYER_API_APPSYNC.md`                   | L4         | GraphQL OR real-time subscriptions detected               |
+| `LAYER_FRONTEND.md`                      | L5         | Frontend / web app detected                               |
+| `OPS_ADVANCED_MONITORING.md`             | L6+        | compliance, backup, canary, cost monitoring detected      |
+| **— MLOps / Data Platform —**            |            |                                                           |
+| `MLOPS_DATA_PLATFORM.md`                 | Data       | Data lake, Glue ETL, Athena, Redshift detected            |
+| `MLOPS_SAGEMAKER_TRAINING.md`            | ML         | Model training, Feature Store, Model Registry detected    |
+| `MLOPS_SAGEMAKER_SERVING.md`             | ML         | Model deployment, endpoints, drift monitoring detected    |
+| `LLMOPS_BEDROCK.md`                      | LLM        | Bedrock, RAG, LLM Gateway, AI agents detected             |
+| **— Specialized SageMaker Pipelines —**  |            |                                                           |
+| `MLOPS_PIPELINE_LLM_FINETUNING.md`       | ML         | LLM fine-tuning, LoRA, QLoRA, Llama, Mistral detected     |
+| `MLOPS_PIPELINE_NLP_HUGGINGFACE.md`      | ML         | NLP, BERT, text classification, NER, sentiment detected   |
+| `MLOPS_PIPELINE_FRAUD_REALTIME.md`       | ML         | Real-time fraud, <100ms latency, Feature Store detected   |
+| `MLOPS_PIPELINE_TIMESERIES.md`           | ML         | Time series, demand forecast, DeepAR, Prophet detected    |
+| `MLOPS_PIPELINE_COMPUTER_VISION.md`      | ML         | CV, image detection, YOLOv8, segmentation detected        |
+| `MLOPS_PIPELINE_RECOMMENDATIONS.md`      | ML         | Recommendations, collaborative filtering detected         |
+| `MLOPS_MULTI_MODEL_ENDPOINT.md`          | ML         | SaaS ML, 1 model per tenant, multi-tenant detected        |
+| `MLOPS_BATCH_TRANSFORM.md`               | ML         | Batch scoring, nightly predictions, offline ML detected   |
+| `MLOPS_CLARIFY_EXPLAINABILITY.md`        | ML         | SHAP, bias, explainability, EU AI Act, HIPAA ML detected  |
+| `MLOPS_GROUND_TRUTH.md`                  | ML         | Data labeling, annotation, active learning detected       |
+| **— Enterprise Security & Compliance —** |            |                                                           |
+| `SECURITY_WAF_SHIELD_MACIE.md`           | Security   | WAF, DDoS, bot protection, PII scanning detected          |
+| `COMPLIANCE_HIPAA_PCIDSS.md`             | Compliance | HIPAA, PCI DSS, SOC2, FedRAMP, regulated workload         |
+| `GLOBAL_MULTI_REGION.md`                 | Global     | Multi-region, active-active, <1min RTO, global users      |
+| **— Startup / SaaS Platform —**          |            |                                                           |
+| `PLATFORM_EKS_CLUSTER.md`                | Platform   | Kubernetes, EKS, Helm, GitOps, ArgoCD detected            |
+| `DATA_MSK_KAFKA.md`                      | Streaming  | Apache Kafka, MSK, Schema Registry, exactly-once detected |
+| `OBS_OPENTELEMETRY_GRAFANA.md`           | Observ.    | Prometheus, Grafana, OpenTelemetry, OTEL, SLO detected    |
 
 ---
 
