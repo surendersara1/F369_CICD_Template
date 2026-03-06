@@ -192,6 +192,10 @@ Use this table to decide which AWS services to include based on SOW keywords:
 | **— MLOps / Data Science —**                                |                                                      |                                             |
 | "data lake", "feature engineering", "Glue", "Iceberg"       | S3 4-zone lake + Glue ETL + Athena + Lake Formation  | `MLOPS_DATA_PLATFORM.md`                    |
 | "data warehouse", "Redshift", "BI", "analysts"              | Redshift Serverless + Glue catalog                   | `MLOPS_DATA_PLATFORM.md`                    |
+| "lakehouse", "Iceberg tables", "ACID on S3", "MERGE INTO"   | S3 Iceberg + Athena v3 DML + Redshift Spectrum       | `DATA_LAKEHOUSE_ICEBERG.md`                 |
+| "Redshift Spectrum", "federated query", "data mesh"         | Redshift Serverless + Spectrum + Lake Formation      | `DATA_LAKEHOUSE_ICEBERG.md`                 |
+| "time travel", "schema evolution", "Lake Formation"         | Iceberg snapshots + Glue Catalog + Athena v3         | `DATA_LAKEHOUSE_ICEBERG.md`                 |
+| "column security", "row-level filter", "tenant isolation"   | Lake Formation column masking + row-level filters    | `DATA_LAKEHOUSE_ICEBERG.md`                 |
 | "train model", "SageMaker Pipelines", "ML pipeline"         | SageMaker Studio + Feature Store + Model Registry    | `MLOPS_SAGEMAKER_TRAINING.md`               |
 | "model deployment", "inference endpoint", "real-time score" | SageMaker endpoint + auto-scaling + blue-green       | `MLOPS_SAGEMAKER_SERVING.md`                |
 | "model drift", "data drift", "model monitor"                | SageMaker Model Monitor + retrain trigger            | `MLOPS_SAGEMAKER_SERVING.md`                |
@@ -247,6 +251,7 @@ When generating code, include these partials based on SOW detection:
 | `OPS_ADVANCED_MONITORING.md`             | L6+        | compliance, backup, canary, cost monitoring detected      |
 | **— MLOps / Data Platform —**            |            |                                                           |
 | `MLOPS_DATA_PLATFORM.md`                 | Data       | Data lake, Glue ETL, Athena, Redshift detected            |
+| `DATA_LAKEHOUSE_ICEBERG.md`              | Lakehouse  | Iceberg ACID tables, Athena DML, Spectrum, data mesh      |
 | `MLOPS_SAGEMAKER_TRAINING.md`            | ML         | Model training, Feature Store, Model Registry detected    |
 | `MLOPS_SAGEMAKER_SERVING.md`             | ML         | Model deployment, endpoints, drift monitoring detected    |
 | `LLMOPS_BEDROCK.md`                      | LLM        | Bedrock, RAG, LLM Gateway, AI agents detected             |
