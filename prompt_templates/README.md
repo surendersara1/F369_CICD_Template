@@ -43,25 +43,33 @@ You never use these directly — they are Claude's reference material.
 Think of them like a chef's mise en place: prepped ingredients Claude
 assembles into your specific dish (project).
 
-| Partial File                  | AWS Services It Covers                                                                                                                                                               |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `LAYER_NETWORKING.md`         | VPC, subnets, NAT Gateways, VPC Endpoints, Security Groups                                                                                                                           |
-| `LAYER_SECURITY.md`           | KMS keys, Secrets Manager, IAM roles, CloudTrail, GuardDuty                                                                                                                          |
-| `LAYER_DATA.md`               | Aurora Serverless V2, DynamoDB, ElastiCache Redis, S3, SQS                                                                                                                           |
-| `LAYER_BACKEND_LAMBDA.md`     | Lambda microservices loop, EventBridge schedulers                                                                                                                                    |
-| `LAYER_BACKEND_ECS.md`        | ECS Fargate long-running workers, SQS task triggers                                                                                                                                  |
-| `EVENT_DRIVEN_PATTERNS.md`    | SNS fan-out, SQS FIFO, EventBridge Bus, Kinesis, DynamoDB Streams, S3 triggers, DLQ redrive                                                                                          |
-| `WORKFLOW_STEP_FUNCTIONS.md`  | Step Functions: sequential, parallel, saga, human approval                                                                                                                           |
-| `LAYER_API.md`                | API Gateway REST, Cognito User Pool (MFA), JWT authorizers                                                                                                                           |
-| `LAYER_API_APPSYNC.md`        | AppSync GraphQL, real-time subscriptions, VTL resolvers                                                                                                                              |
-| `LAYER_FRONTEND.md`           | S3 + CloudFront + WAF + security headers + OAI                                                                                                                                       |
-| `LAYER_OBSERVABILITY.md`      | CloudWatch alarms, dashboards, X-Ray tracing, SNS alerts                                                                                                                             |
-| `OPS_ADVANCED_MONITORING.md`  | Synthetics canaries, AWS Config rules, AWS Backup, Cost Anomaly Detection, SSM Parameter Store                                                                                       |
-| `CICD_PIPELINE_STAGES.md`     | Dev → Staging → Prod pipeline stages, approval gates, rollback                                                                                                                       |
-| `MLOPS_DATA_PLATFORM.md`      | S3 4-zone data lake (raw/processed/curated/features), Glue ETL (Iceberg), Athena, Lake Formation governance, Redshift Serverless, EMR Serverless Spark                               |
-| `MLOPS_SAGEMAKER_TRAINING.md` | SageMaker Studio Domain (VPC-only), Feature Store (online+offline), Model Registry, MLflow tracking server, Pipeline trigger Lambda, spot instance training, 3-domain ML env         |
-| `MLOPS_SAGEMAKER_SERVING.md`  | Real-time endpoints with A/B multi-variant, serverless inference, auto-scaling, blue-green deploy with auto-rollback, Model Monitor data drift detection                             |
-| `LLMOPS_BEDROCK.md`           | Bedrock Knowledge Bases RAG (OpenSearch vector store), Bedrock Agents, Guardrails (PII redaction, topic blocking, grounding), LLM Gateway, prompt registry, token cost observability |
+| Partial File                             | AWS Services It Covers                                                                                                                                                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LAYER_NETWORKING.md`                    | VPC, subnets, NAT Gateways, VPC Endpoints, Security Groups                                                                                                                                                               |
+| `LAYER_SECURITY.md`                      | KMS keys, Secrets Manager, IAM roles, CloudTrail, GuardDuty                                                                                                                                                              |
+| `LAYER_DATA.md`                          | Aurora Serverless V2, DynamoDB, ElastiCache Redis, S3, SQS                                                                                                                                                               |
+| `LAYER_BACKEND_LAMBDA.md`                | Lambda microservices loop, EventBridge schedulers                                                                                                                                                                        |
+| `LAYER_BACKEND_ECS.md`                   | ECS Fargate long-running workers, SQS task triggers                                                                                                                                                                      |
+| `EVENT_DRIVEN_PATTERNS.md`               | SNS fan-out, SQS FIFO, EventBridge Bus, Kinesis, DynamoDB Streams, S3 triggers, DLQ redrive                                                                                                                              |
+| `WORKFLOW_STEP_FUNCTIONS.md`             | Step Functions: sequential, parallel, saga, human approval                                                                                                                                                               |
+| `LAYER_API.md`                           | API Gateway REST, Cognito User Pool (MFA), JWT authorizers                                                                                                                                                               |
+| `LAYER_API_APPSYNC.md`                   | AppSync GraphQL, real-time subscriptions, VTL resolvers                                                                                                                                                                  |
+| `LAYER_FRONTEND.md`                      | S3 + CloudFront + WAF + security headers + OAI                                                                                                                                                                           |
+| `LAYER_OBSERVABILITY.md`                 | CloudWatch alarms, dashboards, X-Ray tracing, SNS alerts                                                                                                                                                                 |
+| `OPS_ADVANCED_MONITORING.md`             | Synthetics canaries, AWS Config rules, AWS Backup, Cost Anomaly Detection, SSM Parameter Store                                                                                                                           |
+| `CICD_PIPELINE_STAGES.md`                | Dev → Staging → Prod pipeline stages, approval gates, rollback                                                                                                                                                           |
+| `MLOPS_DATA_PLATFORM.md`                 | S3 4-zone data lake (raw/processed/curated/features), Glue ETL (Iceberg), Athena, Lake Formation governance, Redshift Serverless, EMR Serverless Spark                                                                   |
+| `MLOPS_SAGEMAKER_TRAINING.md`            | SageMaker Studio Domain (VPC-only), Feature Store (online+offline), Model Registry, MLflow tracking server, Pipeline trigger Lambda, spot instance training, 3-domain ML env                                             |
+| `MLOPS_SAGEMAKER_SERVING.md`             | Real-time endpoints with A/B multi-variant, serverless inference, auto-scaling, blue-green deploy with auto-rollback, Model Monitor data drift detection                                                                 |
+| `LLMOPS_BEDROCK.md`                      | Bedrock Knowledge Bases RAG (OpenSearch vector store), Bedrock Agents, Guardrails (PII redaction, topic blocking, grounding), LLM Gateway, prompt registry, token cost observability                                     |
+| **— Enterprise / Regulated Workloads —** |                                                                                                                                                                                                                          |
+| `SECURITY_WAF_SHIELD_MACIE.md`           | WAF v2 managed rules (OWASP Top 10, Bot Control, ATP account takeover, geo-block, IP rate limit), Shield Advanced DDoS, Network Firewall (AWS threat intel + domain allowlist), Macie PII/PHI scanning, Security Hub     |
+| `COMPLIANCE_HIPAA_PCIDSS.md`             | WORM audit trail (S3 Object Lock), 19 AWS Config managed rules, Backup vault lock (7-year retention), Inspector v2 auto-enable, weekly evidence collector Lambda — supports HIPAA / PCI DSS / SOC2                       |
+| `GLOBAL_MULTI_REGION.md`                 | AWS Global Accelerator anycast IPs, Route53 health check failover, Aurora Global Database (<1s RPO), DynamoDB Global Tables (active-active multi-master), S3 CRR, regional health Lambda, replication lag alarm          |
+| **— Startup / SaaS Platform —**          |                                                                                                                                                                                                                          |
+| `PLATFORM_EKS_CLUSTER.md`                | EKS 1.31 private cluster, Karpenter autoscaler (spot + on-demand, 30s provision), AWS Load Balancer Controller ALB Ingress, External Secrets Operator, EBS CSI gp3 encrypted storage                                     |
+| `DATA_MSK_KAFKA.md`                      | Amazon MSK Kafka 3.6 (IAM auth + TLS + KMS encryption), Glue Schema Registry (Avro + backward compatibility), Kafka admin Lambda, disk/CPU/consumer-lag alarms, broker sizing guide                                      |
+| `OBS_OPENTELEMETRY_GRAFANA.md`           | Amazon Managed Prometheus (SLO recording rules + error budgets), Managed Grafana with SSO, ADOT Lambda layer (zero-code tracing), CloudWatch RUM (Core Web Vitals), SLO error budget dashboard, Alertmanager → PagerDuty |
 
 ---
 
@@ -246,6 +254,16 @@ Claude automatically detects which AWS services you need based on keywords in yo
 | "prompt management", "prompt versioning", "A/B test prompts"             | Prompt Registry (DynamoDB) + SSM parameter store                     |
 | "PII in LLM", "content filtering", "safe AI"                             | Bedrock Guardrails (PII redaction + topic blocking + grounding)      |
 | "LLM cost", "token tracking", "AI spend"                                 | LLM Gateway Lambda with token metering + cost alarm                  |
+| "WAF", "bot protection", "DDoS", "rate limiting", "OWASP"                | WAF v2 (OWASP + Bot Control + ATP) + Shield Advanced                 |
+| "intrusion detection", "network firewall", "egress filtering"            | AWS Network Firewall + GuardDuty                                     |
+| "PII scanning", "PHI in S3", "data classification"                       | Amazon Macie with custom data identifiers                            |
+| "security findings", "Security Hub", "posture management"                | AWS Security Hub + Inspector v2                                      |
+| "multi-region", "active-active", "global DR", "<1 minute RTO"            | Global Accelerator + Aurora Global DB + DynamoDB Global Tables       |
+| "Kubernetes", "K8s", "EKS", "Helm", "GitOps", "ArgoCD"                   | EKS cluster + Karpenter + External Secrets + AWS LBC                 |
+| "Apache Kafka", "MSK", "Schema Registry", "exactly-once"                 | Amazon MSK + Glue Schema Registry (Avro/Protobuf)                    |
+| "Prometheus", "Grafana", "OpenTelemetry", "OTEL", "distributed tracing"  | AMP + Managed Grafana + ADOT Lambda layer                            |
+| "real user monitoring", "Core Web Vitals", "frontend errors", "RUM"      | CloudWatch RUM with session recording                                |
+| "SLO", "error budget", "SLI", "reliability engineering"                  | AMP recording rules + Grafana SLO dashboard + Alertmanager           |
 
 ---
 
@@ -389,6 +407,71 @@ User Query ──► LLM Gateway Lambda ──► Guardrails (PII check, topic b
 
 ---
 
+## Enterprise / Regulated Workload Coverage
+
+Use **three dedicated partials** when SOW mentions compliance, DDoS, PII, or global reach:
+
+| Partial                        | What Gets Deployed                                                                                                                                    | Compliance Addressed                   |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `SECURITY_WAF_SHIELD_MACIE.md` | WAF v2 (OWASP + Bot Control + ATP + geo-block) → Shield Advanced → Network Firewall (threat intel + domain allowlist) → Macie PII scan → Security Hub | PCI DSS 6.6, HIPAA § 164.312, SOC2 CC6 |
+| `COMPLIANCE_HIPAA_PCIDSS.md`   | WORM S3 Object Lock (6yr HIPAA / 1yr PCI) → 19 Config rules → Backup vault lock → Inspector v2 → weekly evidence collector                            | HIPAA, PCI DSS 10.5, SOC2 CC7          |
+| `GLOBAL_MULTI_REGION.md`       | Global Accelerator → Route53 failover → Aurora Global DB → DynamoDB Global → S3 CRR                                                                   | Business continuity, data residency    |
+
+### Defense-in-Depth Stack
+
+```
+Internet Traffic
+      │
+      ▼  Layer 1: Shield Advanced (L3/L4 DDoS volumetric)
+      ▼  Layer 2: WAF v2 (L7 HTTP — OWASP, bots, credential stuffing)
+      ▼  Layer 3: CloudFront (edge caching, TLS termination)
+      ▼  Layer 4: Network Firewall (VPC-level stateful, IDS/IPS, domain block)
+      ▼  Layer 5: Security Groups (port-level, least privilege)
+      ▼  Layer 6: VPC Private Subnets (no direct internet exposure)
+      ▼  App: Lambda / ECS / EKS
+
+Data Protection:
+  Macie   → Scan S3 for PII/PHI automatically
+  Config  → 19 rules alerting on any drift from compliance baseline
+  Backup  → Immutable vault-locked backups (cannot be deleted, even by root)
+```
+
+---
+
+## Startup / SaaS Platform Coverage
+
+Three partials replace entire managed platform engineering stacks:
+
+| Partial                        | What Gets Deployed                                           | Replaces                                   |
+| ------------------------------ | ------------------------------------------------------------ | ------------------------------------------ |
+| `PLATFORM_EKS_CLUSTER.md`      | EKS 1.31 + Karpenter + AWS LBC + External Secrets + EBS CSI  | Self-managed K8s, kops, Rancher            |
+| `DATA_MSK_KAFKA.md`            | MSK Kafka 3.6 + Glue Schema Registry + admin Lambda + alarms | Self-managed Confluent, self-managed Kafka |
+| `OBS_OPENTELEMETRY_GRAFANA.md` | AMP + Managed Grafana + ADOT Lambda + RUM + SLO dashboard    | Self-managed Grafana/Prometheus stacks     |
+
+### Karpenter vs Cluster Autoscaler
+
+```
+Cluster Autoscaler (old):          Karpenter (new — 2024 default):
+  Provision time: 3-5 minutes        Provision time: < 30 seconds
+  Bin-packing:    Manual             Bin-packing:    Automatic (WhenUnderutilized)
+  Node rotation:  Manual             Node rotation:  Automatic (expireAfter: 720h)
+  Spot support:   Basic              Spot support:   First-class (fallback chain)
+  Cost savings:   10-20%             Cost savings:   Up to 70% with mixed instances
+```
+
+### MSK vs Kinesis Decision
+
+```
+Use MSK (Kafka) when:              Use Kinesis when:
+  Team knows Kafka                   Team prefers Lambda + managed
+  Schema Registry needed             < 7 day retention OK
+  Kafka Connect ecosystem            Cost at low scale matters
+  Exactly-once semantics critical    Simple Lambda fan-out needed
+  Long retention (weeks/months)
+```
+
+---
+
 ## Design Principles
 
 - **Layered Architecture** — Every project decomposes into 8 ordered layers (Networking → Security → Data → Backend → API → Frontend → Observability → CICD)
@@ -405,3 +488,11 @@ User Query ──► LLM Gateway Lambda ──► Guardrails (PII check, topic b
 - **Drift → Retrain Loop** — Model Monitor triggers retraining Lambda automatically when data drift is detected
 - **LLM Gateway Pattern** — All Bedrock calls go through a single Lambda for rate limiting, cost tracking, caching, and guardrails
 - **LLM Cost Observability** — Token usage and estimated cost tracked per request, with CloudWatch alarm on hourly spend spikes
+- **Defense-in-Depth Security** — 6 layers: Shield → WAF → CloudFront → Network Firewall → Security Groups → Private Subnets
+- **WORM Audit Trails** — Compliance logs use S3 Object Lock (tamper-proof, immutable, even root can't delete)
+- **Zero Trust Secrets** — Kubernetes uses External Secrets Operator — secrets never in YAML, always synced from Secrets Manager
+- **Karpenter over CA** — EKS uses Karpenter (30s provision, auto bin-packing, 70% cost saving) not Cluster Autoscaler
+- **Schema Registry First** — Kafka topics always paired with Avro/Protobuf schema in Glue Schema Registry (backward compatibility enforced)
+- **SLO Error Budgets** — Alerts fire on error budget burn rate, not just raw error counts — reduces alert fatigue
+- **Active-Active by Design** — Multi-region uses DynamoDB Global Tables + Aurora Global DB, not primary/replica hot-standby
+- **OpenTelemetry as Standard** — All services emit traces/metrics/logs via ADOT — no vendor lock-in on observability
