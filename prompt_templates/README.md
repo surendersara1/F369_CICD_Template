@@ -43,21 +43,25 @@ You never use these directly — they are Claude's reference material.
 Think of them like a chef's mise en place: prepped ingredients Claude
 assembles into your specific dish (project).
 
-| Partial File                 | AWS Services It Covers                                                                         |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `LAYER_NETWORKING.md`        | VPC, subnets, NAT Gateways, VPC Endpoints, Security Groups                                     |
-| `LAYER_SECURITY.md`          | KMS keys, Secrets Manager, IAM roles, CloudTrail, GuardDuty                                    |
-| `LAYER_DATA.md`              | Aurora Serverless V2, DynamoDB, ElastiCache Redis, S3, SQS                                     |
-| `LAYER_BACKEND_LAMBDA.md`    | Lambda microservices loop, EventBridge schedulers                                              |
-| `LAYER_BACKEND_ECS.md`       | ECS Fargate long-running workers, SQS task triggers                                            |
-| `EVENT_DRIVEN_PATTERNS.md`   | SNS fan-out, SQS FIFO, EventBridge Bus, Kinesis, DynamoDB Streams, S3 triggers, DLQ redrive    |
-| `WORKFLOW_STEP_FUNCTIONS.md` | Step Functions: sequential, parallel, saga, human approval                                     |
-| `LAYER_API.md`               | API Gateway REST, Cognito User Pool (MFA), JWT authorizers                                     |
-| `LAYER_API_APPSYNC.md`       | AppSync GraphQL, real-time subscriptions, VTL resolvers                                        |
-| `LAYER_FRONTEND.md`          | S3 + CloudFront + WAF + security headers + OAI                                                 |
-| `LAYER_OBSERVABILITY.md`     | CloudWatch alarms, dashboards, X-Ray tracing, SNS alerts                                       |
-| `OPS_ADVANCED_MONITORING.md` | Synthetics canaries, AWS Config rules, AWS Backup, Cost Anomaly Detection, SSM Parameter Store |
-| `CICD_PIPELINE_STAGES.md`    | Dev → Staging → Prod pipeline stages, approval gates, rollback                                 |
+| Partial File                  | AWS Services It Covers                                                                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LAYER_NETWORKING.md`         | VPC, subnets, NAT Gateways, VPC Endpoints, Security Groups                                                                                                                           |
+| `LAYER_SECURITY.md`           | KMS keys, Secrets Manager, IAM roles, CloudTrail, GuardDuty                                                                                                                          |
+| `LAYER_DATA.md`               | Aurora Serverless V2, DynamoDB, ElastiCache Redis, S3, SQS                                                                                                                           |
+| `LAYER_BACKEND_LAMBDA.md`     | Lambda microservices loop, EventBridge schedulers                                                                                                                                    |
+| `LAYER_BACKEND_ECS.md`        | ECS Fargate long-running workers, SQS task triggers                                                                                                                                  |
+| `EVENT_DRIVEN_PATTERNS.md`    | SNS fan-out, SQS FIFO, EventBridge Bus, Kinesis, DynamoDB Streams, S3 triggers, DLQ redrive                                                                                          |
+| `WORKFLOW_STEP_FUNCTIONS.md`  | Step Functions: sequential, parallel, saga, human approval                                                                                                                           |
+| `LAYER_API.md`                | API Gateway REST, Cognito User Pool (MFA), JWT authorizers                                                                                                                           |
+| `LAYER_API_APPSYNC.md`        | AppSync GraphQL, real-time subscriptions, VTL resolvers                                                                                                                              |
+| `LAYER_FRONTEND.md`           | S3 + CloudFront + WAF + security headers + OAI                                                                                                                                       |
+| `LAYER_OBSERVABILITY.md`      | CloudWatch alarms, dashboards, X-Ray tracing, SNS alerts                                                                                                                             |
+| `OPS_ADVANCED_MONITORING.md`  | Synthetics canaries, AWS Config rules, AWS Backup, Cost Anomaly Detection, SSM Parameter Store                                                                                       |
+| `CICD_PIPELINE_STAGES.md`     | Dev → Staging → Prod pipeline stages, approval gates, rollback                                                                                                                       |
+| `MLOPS_DATA_PLATFORM.md`      | S3 4-zone data lake (raw/processed/curated/features), Glue ETL (Iceberg), Athena, Lake Formation governance, Redshift Serverless, EMR Serverless Spark                               |
+| `MLOPS_SAGEMAKER_TRAINING.md` | SageMaker Studio Domain (VPC-only), Feature Store (online+offline), Model Registry, MLflow tracking server, Pipeline trigger Lambda, spot instance training, 3-domain ML env         |
+| `MLOPS_SAGEMAKER_SERVING.md`  | Real-time endpoints with A/B multi-variant, serverless inference, auto-scaling, blue-green deploy with auto-rollback, Model Monitor data drift detection                             |
+| `LLMOPS_BEDROCK.md`           | Bedrock Knowledge Bases RAG (OpenSearch vector store), Bedrock Agents, Guardrails (PII redaction, topic blocking, grounding), LLM Gateway, prompt registry, token cost observability |
 
 ---
 
@@ -207,27 +211,41 @@ your-project-name/
 
 Claude automatically detects which AWS services you need based on keywords in your SOW:
 
-| If your SOW mentions...                   | Claude includes...                               |
-| ----------------------------------------- | ------------------------------------------------ |
-| "authentication", "login", "MFA"          | Cognito User Pool with enforced MFA              |
-| "REST API", "HTTP endpoints"              | API Gateway + Lambda + Cognito authorizer        |
-| "GraphQL", "real-time", "subscriptions"   | AppSync + DynamoDB resolvers                     |
-| "file upload", "documents", "media"       | S3 + CloudFront signed URLs + virus scan queue   |
-| "background jobs", ">15 minutes"          | ECS Fargate + SQS trigger Lambda                 |
-| "workflow", "multi-step approval"         | Step Functions with `.waitForTaskToken`          |
-| "decouple", "pub/sub", "fan-out"          | SNS → SQS fan-out pattern                        |
-| "ordered processing", "FIFO"              | SQS FIFO with deduplication                      |
-| "streaming", ">1000 events/sec"           | Kinesis Data Streams + Firehose                  |
-| "scheduled", "cron", "nightly"            | EventBridge Scheduler + Lambda                   |
-| "relational", "SQL", "transactions"       | Aurora Serverless V2 (PostgreSQL)                |
-| "NoSQL", "key-value", "metadata"          | DynamoDB                                         |
-| "cache", "low latency"                    | ElastiCache Redis                                |
-| "frontend", "React", "Next.js", "web app" | S3 + CloudFront + WAF + security headers         |
-| "HIPAA", "SOC2", "compliance", "audit"    | CloudTrail + GuardDuty + AWS Config + AWS Backup |
-| "SLA monitoring", "canary", "uptime"      | CloudWatch Synthetics                            |
-| "backup", "RTO", "RPO"                    | AWS Backup with vault lock + 7yr retention       |
-| "cost governance", "budget"               | Cost Anomaly Detection                           |
-| "multi-region", "DR", "global"            | Route53 + Global Accelerator + S3 CRR            |
+| If your SOW mentions...                                                  | Claude includes...                                                   |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| "authentication", "login", "MFA"                                         | Cognito User Pool with enforced MFA                                  |
+| "REST API", "HTTP endpoints"                                             | API Gateway + Lambda + Cognito authorizer                            |
+| "GraphQL", "real-time", "subscriptions"                                  | AppSync + DynamoDB resolvers                                         |
+| "file upload", "documents", "media"                                      | S3 + CloudFront signed URLs + virus scan queue                       |
+| "background jobs", ">15 minutes"                                         | ECS Fargate + SQS trigger Lambda                                     |
+| "workflow", "multi-step approval"                                        | Step Functions with `.waitForTaskToken`                              |
+| "decouple", "pub/sub", "fan-out"                                         | SNS → SQS fan-out pattern                                            |
+| "ordered processing", "FIFO"                                             | SQS FIFO with deduplication                                          |
+| "streaming", ">1000 events/sec"                                          | Kinesis Data Streams + Firehose                                      |
+| "scheduled", "cron", "nightly"                                           | EventBridge Scheduler + Lambda                                       |
+| "relational", "SQL", "transactions"                                      | Aurora Serverless V2 (PostgreSQL)                                    |
+| "NoSQL", "key-value", "metadata"                                         | DynamoDB                                                             |
+| "cache", "low latency"                                                   | ElastiCache Redis                                                    |
+| "frontend", "React", "Next.js", "web app"                                | S3 + CloudFront + WAF + security headers                             |
+| "HIPAA", "SOC2", "compliance", "audit"                                   | CloudTrail + GuardDuty + AWS Config + AWS Backup                     |
+| "SLA monitoring", "canary", "uptime"                                     | CloudWatch Synthetics                                                |
+| "backup", "RTO", "RPO"                                                   | AWS Backup with vault lock + 7yr retention                           |
+| "cost governance", "budget"                                              | Cost Anomaly Detection                                               |
+| "multi-region", "DR", "global"                                           | Route53 + Global Accelerator + S3 CRR                                |
+| "data science", "feature engineering", "data lake"                       | S3 4-zone lake + Glue ETL (Iceberg) + Athena + Lake Formation        |
+| "data warehouse", "BI", "QuickSight", "analysts"                         | Redshift Serverless + Athena + Glue catalog                          |
+| "large-scale ETL", "Spark", "PySpark", "petabyte"                        | EMR Serverless                                                       |
+| "train model", "ML pipeline", "SageMaker Pipelines"                      | SageMaker Studio + Feature Store + Model Registry + Pipeline trigger |
+| "experiment tracking", "MLflow", "hyperparameter tuning"                 | MLflow on SageMaker + Experiments + HPO Jobs                         |
+| "model deployment", "inference endpoint", "real-time scoring"            | SageMaker real-time endpoint + auto-scaling + blue-green deploy      |
+| "model monitoring", "data drift", "model decay", "training-serving skew" | SageMaker Model Monitor + drift alarms + retraining trigger          |
+| "A/B test models", "champion/challenger", "shadow mode"                  | SageMaker multi-variant endpoint with traffic weights                |
+| "LLM", "generative AI", "chatbot", "Claude", "Bedrock"                   | Bedrock API + Guardrails + LLM Gateway Lambda                        |
+| "RAG", "document Q&A", "knowledge base", "retrieval"                     | Bedrock Knowledge Bases + OpenSearch Serverless vector store         |
+| "AI agent", "agentic", "multi-step AI", "tool use"                       | Bedrock Agents + action group Lambda                                 |
+| "prompt management", "prompt versioning", "A/B test prompts"             | Prompt Registry (DynamoDB) + SSM parameter store                     |
+| "PII in LLM", "content filtering", "safe AI"                             | Bedrock Guardrails (PII redaction + topic blocking + grounding)      |
+| "LLM cost", "token tracking", "AI spend"                                 | LLM Gateway Lambda with token metering + cost alarm                  |
 
 ---
 
@@ -268,6 +286,109 @@ Git push to 'main' branch
 
 ---
 
+## MLOps / LLMOps / AIOps Coverage
+
+This library has **full MLOps, LLMOps, and AIOps coverage** via 4 dedicated partials.
+Claude automatically includes them when it detects ML/AI keywords in your SOW.
+
+### The Four MLOps/LLMOps Partials
+
+| Partial                       | What It Covers                                                                                                                                                                                            | SOW Keywords That Trigger It                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `MLOPS_DATA_PLATFORM.md`      | **Data Foundation** — S3 4-zone lake, Glue ETL (Iceberg format), Athena serverless SQL, Lake Formation column-level governance, Redshift Serverless DW, EMR Serverless Spark                              | "data science", "feature engineering", "data lake", "analytics"                     |
+| `MLOPS_SAGEMAKER_TRAINING.md` | **Training Platform** — Studio Domain (VPC-only), Feature Store (online + offline), Model Registry, MLflow tracking, Pipeline trigger Lambda, spot instance training (90% cheaper), 3-domain env strategy | "train model", "ML pipeline", "experiments", "model registry", "MLflow"             |
+| `MLOPS_SAGEMAKER_SERVING.md`  | **Production Serving** — Real-time endpoints, A/B multi-variant, serverless inference, auto-scaling, blue-green deploy with auto-rollback, Model Monitor drift detection                                  | "inference endpoint", "model deployment", "drift monitoring", "champion/challenger" |
+| `LLMOPS_BEDROCK.md`           | **LLMOps** — Bedrock RAG (OpenSearch vector store + Knowledge Bases), Agents + action groups, Guardrails (PII redaction, topic blocking, grounding), LLM Gateway, prompt registry, token cost dashboard   | "LLM", "RAG", "chatbot", "Bedrock", "generative AI", "agents"                       |
+
+---
+
+### The 3-Domain ML Environment Strategy
+
+> ⚠️ **This is DIFFERENT from software dev/staging/prod.** ML projects need a three-domain structure designed around the ML lifecycle:
+
+| Domain                | Who Uses It     | What Happens Here                                                                      | Approval Required?                                      |
+| --------------------- | --------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Data Science (DS)** | Data scientists | Free exploration, EDA, prototyping, any experiment, no governance                      | ❌ None — open sandbox                                  |
+| **ML Staging**        | ML Engineers    | Validated training pipelines, systematic evaluation, A/B test setup, integration tests | ✅ ML Engineer review                                   |
+| **ML Production**     | Model Ops team  | Only approved models (via Model Registry) serve live traffic, monitored 24/7           | ✅ Model Committee approval in SageMaker Model Registry |
+
+**How it connects to software pipelines:**
+
+```
+Software CICD:    Dev ──────────────► Staging ──────► Prod
+                   ↑                                    ↑
+ML Serving:    DS Domain ──► ML Staging ──► Model Registry Approval ──► Serving Endpoint
+ML Training:   Studio (any) → Pipeline Run → Evaluation → Pending → Approved → Deployed
+```
+
+---
+
+### ML Pipeline Design (SageMaker Pipelines)
+
+```
+Scheduled Trigger (EventBridge) OR Manual trigger
+    │
+    ▼
+[Step 1: Feature Engineering]
+  ProcessingJob (SKLearn/Pandas)
+  Source: S3 raw zone → Output: Feature Store + processed zone
+    │
+    ▼
+[Step 2: Model Training]
+  TrainingJob (Spot instances — up to 90% cheaper)
+  Algorithm: XGBoost / PyTorch / Hugging Face / custom container
+  Checkpoints saved to S3 (resume if Spot interrupted)
+    │
+    ▼
+[Step 3: Model Evaluation]
+  ProcessingJob calculates: Accuracy, AUC, F1, RMSE, SHAP values
+    │
+    ▼
+[Step 4: Accuracy Gate (Condition Step)]
+  IF accuracy >= threshold → Register model
+  IF below threshold       → Pipeline stops (no bad model registered)
+    │
+    ▼ (if passes)
+[Step 5: Register in Model Registry]
+  Status: PendingManualApproval
+  ML Engineer reviews metrics in Studio → clicks Approve/Reject
+    │
+    ▼ (on Approve — triggered by EventBridge)
+[Model Deployer Lambda]
+  Blue-green traffic shift: 10% → 50% → 100%
+  Auto-rollback if endpoint error alarm fires
+    │
+    ▼
+[Model Monitor — runs daily]
+  Checks data distribution vs training baseline
+  If drift detected → CloudWatch alarm → triggers retraining
+```
+
+---
+
+### LLMOps Architecture (Bedrock)
+
+```
+Documents (S3) ──► Bedrock Knowledge Base ──► OpenSearch Vector Store
+                         │  (chunked, embedded)
+                         │
+User Query ──► LLM Gateway Lambda ──► Guardrails (PII check, topic block)
+                         │                    │ (if safe)
+                         ▼                    ▼
+               Bedrock RAG (Retrieve + Generate)
+                  1. Embed query (Titan Embed V2)
+                  2. Vector similarity search in OpenSearch
+                  3. Retrieved chunks → Claude Sonnet 3.5
+                  4. Grounded response (verified by Guardrail)
+                         │
+                         ▼
+               Response to user
+               + Token usage logged → Cost alarm if spike
+               + Guardrail violations → Security alarm
+```
+
+---
+
 ## Design Principles
 
 - **Layered Architecture** — Every project decomposes into 8 ordered layers (Networking → Security → Data → Backend → API → Frontend → Observability → CICD)
@@ -278,3 +399,9 @@ Git push to 'main' branch
 - **Security by Default** — KMS encryption, VPC isolation, WAF, MFA, Secrets Manager on every project
 - **Compliance-Ready** — CloudTrail, GuardDuty, AWS Config, AWS Backup included when SOW mentions HIPAA/SOC2
 - **Self-Mutating Pipeline** — Push new CDK code and the pipeline updates itself automatically
+- **MLOps 3-Domain Environments** — ML uses DS / Staging / Prod domains; not the same as software dev/staging/prod
+- **Model Approval Gate** — No model reaches production without explicit approval in SageMaker Model Registry
+- **Spot Training by Default** — All SageMaker training jobs use Spot instances (up to 90% cheaper) with checkpoint resume
+- **Drift → Retrain Loop** — Model Monitor triggers retraining Lambda automatically when data drift is detected
+- **LLM Gateway Pattern** — All Bedrock calls go through a single Lambda for rate limiting, cost tracking, caching, and guardrails
+- **LLM Cost Observability** — Token usage and estimated cost tracked per request, with CloudWatch alarm on hourly spend spikes
