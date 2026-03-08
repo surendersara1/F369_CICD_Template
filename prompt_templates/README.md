@@ -322,14 +322,32 @@ Git push to 'main' branch
 This library has **full MLOps, LLMOps, and AIOps coverage** via 4 dedicated partials.
 Claude automatically includes them when it detects ML/AI keywords in your SOW.
 
-### The Four MLOps/LLMOps Partials
+### MLOps / LLMOps Partials (14 total)
+
+**Core ML Platform (always included when ML detected):**
 
 | Partial                       | What It Covers                                                                                                                                                                                            | SOW Keywords That Trigger It                                                        |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `MLOPS_DATA_PLATFORM.md`      | **Data Foundation** — S3 4-zone lake, Glue ETL (Iceberg format), Athena serverless SQL, Lake Formation column-level governance, Redshift Serverless DW, EMR Serverless Spark                              | "data science", "feature engineering", "data lake", "analytics"                     |
+| `DATA_LAKEHOUSE_ICEBERG.md`   | **Enterprise Lakehouse** — S3 5-zone lake, Apache Iceberg ACID tables, Athena v3 DML (MERGE INTO + time travel), Redshift Spectrum federated queries, Lake Formation column/row security, Glue 4.0 Spark  | "lakehouse", "Iceberg", "ACID on S3", "MERGE INTO", "time travel", "data mesh"      |
 | `MLOPS_SAGEMAKER_TRAINING.md` | **Training Platform** — Studio Domain (VPC-only), Feature Store (online + offline), Model Registry, MLflow tracking, Pipeline trigger Lambda, spot instance training (90% cheaper), 3-domain env strategy | "train model", "ML pipeline", "experiments", "model registry", "MLflow"             |
 | `MLOPS_SAGEMAKER_SERVING.md`  | **Production Serving** — Real-time endpoints, A/B multi-variant, serverless inference, auto-scaling, blue-green deploy with auto-rollback, Model Monitor drift detection                                  | "inference endpoint", "model deployment", "drift monitoring", "champion/challenger" |
 | `LLMOPS_BEDROCK.md`           | **LLMOps** — Bedrock RAG (OpenSearch vector store + Knowledge Bases), Agents + action groups, Guardrails (PII redaction, topic blocking, grounding), LLM Gateway, prompt registry, token cost dashboard   | "LLM", "RAG", "chatbot", "Bedrock", "generative AI", "agents"                       |
+
+**Specialized SageMaker Pipelines (included when specific ML use case detected):**
+
+| Partial                              | What It Covers                                                                                                                   | SOW Keywords That Trigger It                                          |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `MLOPS_PIPELINE_LLM_FINETUNING.md`   | LLM fine-tuning with LoRA/QLoRA (Llama, Mistral, Falcon), HuggingFace DLC, SageMaker GPU training (g5.2xlarge), model registry  | "LLM fine-tuning", "LoRA", "QLoRA", "PEFT", "Llama", "Mistral"       |
+| `MLOPS_PIPELINE_NLP_HUGGINGFACE.md`  | NLP pipeline (text classification, NER, sentiment, summarization, embeddings), BERT/RoBERTa/DistilBERT, async + real-time        | "NLP", "BERT", "text classification", "NER", "sentiment"              |
+| `MLOPS_PIPELINE_FRAUD_REALTIME.md`   | Real-time fraud detection (<100ms), Feature Store online store, XGBoost/LightGBM scoring Lambda, FIFO review queue               | "fraud detection", "real-time scoring", "<100ms", "Feature Store"     |
+| `MLOPS_PIPELINE_TIMESERIES.md`       | Time series forecasting (DeepAR, Chronos, Prophet, TFT), daily forecast Lambda, weekly retraining, S3 forecast archive           | "time series", "demand forecast", "DeepAR", "Prophet", "Chronos"      |
+| `MLOPS_PIPELINE_COMPUTER_VISION.md`  | Computer vision (object detection/segmentation/classification, YOLOv8), async inference endpoint, GPU training on g5 instances   | "computer vision", "image detection", "YOLOv8", "OCR", "segmentation" |
+| `MLOPS_PIPELINE_RECOMMENDATIONS.md`  | Recommender system (Two-Tower model, collaborative filtering), hybrid pre-computed + real-time re-ranking, DynamoDB result store  | "recommendations", "collaborative filtering", "Two-Tower"             |
+| `MLOPS_MULTI_MODEL_ENDPOINT.md`      | Multi-Model Endpoint hosting 100s of models on one endpoint, MME router Lambda for per-tenant routing — 90% SaaS ML cost saving  | "100 models", "one model per tenant", "SaaS ML", "multi-tenant ML"    |
+| `MLOPS_BATCH_TRANSFORM.md`           | Large-scale offline scoring with SageMaker Batch Transform, S3 trigger Lambda, post-processing Lambda, failed-job alarm          | "batch scoring", "offline predictions", "nightly ML"                  |
+| `MLOPS_CLARIFY_EXPLAINABILITY.md`    | SageMaker Clarify bias detection (pre/post training) and SHAP explainability, 7-year audit bucket, bias violation alarm          | "SHAP", "explainability", "bias detection", "fairness", "EU AI Act"   |
+| `MLOPS_GROUND_TRUTH.md`              | SageMaker Ground Truth data labeling with private workforce (Cognito), active learning (auto-labeling), training pipeline hook    | "data labeling", "annotation", "active learning", "Ground Truth"      |
 
 ---
 

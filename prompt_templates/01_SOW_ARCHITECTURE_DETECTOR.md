@@ -1,8 +1,8 @@
-﻿# PASS 1 â€” SOW Architecture Detector
+﻿# PASS 1 — SOW Architecture Detector
 
 **Model:** Claude Opus 4.6  
 **Input:** Statement of Work (SOW) Markdown file  
-**Output:** `ARCHITECTURE_MAP.md` â€” Complete structured component map
+**Output:** `ARCHITECTURE_MAP.md` — Complete structured component map
 
 ---
 
@@ -14,14 +14,14 @@ Your sole task in this pass is to READ a Statement of Work document and EXTRACT
 every AWS component needed to fulfill the stated requirements.
 
 You think in 8 architectural layers:
-  L0 â€” Networking:    VPC, subnets, NAT, security groups, VPC endpoints
-  L1 â€” Security:      IAM, KMS, Secrets Manager, WAF, Shield, GuardDuty
-  L2 â€” Data:          Aurora, DynamoDB, S3, Redis, OpenSearch, Glue, Kinesis
-  L3 â€” Backend:       Lambda microservices, ECS Fargate, Step Functions, SQS
-  L4 â€” API:           API Gateway, AppSync, Cognito, Lambda authorizers
-  L5 â€” Frontend:      S3, CloudFront, WAF, OAI, ACM (SSL), Route53
-  L6 â€” Observability: CloudWatch, X-Ray, SNS alarms, Cost Explorer, Trusted Advisor
-  L7 â€” CICD:          CodePipeline, CodeBuild, CodeCommit/GitHub, approvals, rollback
+  L0 — Networking:    VPC, subnets, NAT, security groups, VPC endpoints
+  L1 — Security:      IAM, KMS, Secrets Manager, WAF, Shield, GuardDuty
+  L2 — Data:          Aurora, DynamoDB, S3, Redis, OpenSearch, Glue, Kinesis
+  L3 — Backend:       Lambda microservices, ECS Fargate, Step Functions, SQS
+  L4 — API:           API Gateway, AppSync, Cognito, Lambda authorizers
+  L5 — Frontend:      S3, CloudFront, WAF, OAI, ACM (SSL), Route53
+  L6 — Observability: CloudWatch, X-Ray, SNS alarms, Cost Explorer, Trusted Advisor
+  L7 — CICD:          CodePipeline, CodeBuild, CodeCommit/GitHub, approvals, rollback
 
 For EACH identified component:
   - Name the AWS service precisely (e.g., "Amazon Aurora Serverless V2 PostgreSQL")
@@ -71,14 +71,14 @@ List every discrete service/function detected from the SOW.
 | # | Service Name | Purpose | Trigger Type | HTTP Method | Path | Data Stores Touched | Long-Running? |
 |---|-------------|---------|--------------|-------------|------|---------------------|---------------|
 | 1 | user-auth-service | Handles user registration and login | API Gateway | POST | /auth/login | DynamoDB:users | No |
-| 2 | report-generator | Generates PDF reports from data | SQS queue | - | - | Aurora, S3 | YES â†’ ECS |
+| 2 | report-generator | Generates PDF reports from data | SQS queue | - | - | Aurora, S3 | YES → ECS |
 ...
 
 ---
 
 ## 3. LAYER-BY-LAYER COMPONENT MAP
 
-### L0 â€” NETWORKING
+### L0 — NETWORKING
 | Component | AWS Service | Config (Dev) | Config (Prod) | SOW Justification |
 |-----------|------------|--------------|---------------|-------------------|
 | Main VPC | ec2.Vpc | 2 AZs, /24 CIDRs | 3 AZs, /22 CIDRs | "Isolated network for all services" |
@@ -86,37 +86,37 @@ List every discrete service/function detected from the SOW.
 | VPC Endpoints | ec2.InterfaceVpcEndpoint | S3, DynamoDB, Secrets | All AWS services | Cost + latency optimization |
 ...
 
-### L1 â€” SECURITY
+### L1 — SECURITY
 | Component | AWS Service | Purpose | SOW Justification |
 |-----------|------------|---------|-------------------|
 ...
 
-### L2 â€” DATA
+### L2 — DATA
 | Component | AWS Service | Config | SOW Justification |
 |-----------|------------|--------|-------------------|
 ...
 
-### L3 â€” BACKEND
+### L3 — BACKEND
 | Component | AWS Service | Runtime | Memory | Timeout | SOW Justification |
 |-----------|------------|---------|--------|---------|-------------------|
 ...
 
-### L4 â€” API
+### L4 — API
 | Component | AWS Service | Auth Method | Endpoint Type | SOW Justification |
 |-----------|------------|------------|---------------|-------------------|
 ...
 
-### L5 â€” FRONTEND
+### L5 — FRONTEND
 | Component | AWS Service | Config | SOW Justification |
 |-----------|------------|--------|-------------------|
 ...
 
-### L6 â€” OBSERVABILITY
+### L6 — OBSERVABILITY
 | Component | AWS Service | Purpose |
 |-----------|------------|---------|
 ...
 
-### L7 â€” CICD
+### L7 — CICD
 | Stage | AWS Service | Trigger | Actions | Approval Required? |
 |-------|------------|---------|---------|-------------------|
 | Source | CodeCommit | Git push to main | - | No |
@@ -124,7 +124,7 @@ List every discrete service/function detected from the SOW.
 | Dev Deploy | CodePipeline | Auto | cdk deploy FullSystemStack/Dev | No |
 | Integration Test | CodeBuild | Auto | pytest tests/integration/ | No |
 | Staging Deploy | CodePipeline | Auto after tests | cdk deploy FullSystemStack/Staging | No |
-| Prod Approval | SNS + Manual | Before prod | Email notification | YES â€” Manual Click |
+| Prod Approval | SNS + Manual | Before prod | Email notification | YES — Manual Click |
 | Prod Deploy | CodePipeline | After approval | cdk deploy FullSystemStack/Prod | No |
 | Rollback | CodeDeploy | On alarm | Auto-rollback if error rate > 1% | No |
 
@@ -136,11 +136,11 @@ List every discrete service/function detected from the SOW.
 {{ASCII or Mermaid graph showing service-to-service dependencies}}
 
 Example:
-CloudFront â†’ S3 (frontend assets)
-CloudFront â†’ API Gateway â†’ Lambda (user-service) â†’ DynamoDB
-CloudFront â†’ API Gateway â†’ Lambda (report-service) â†’ SQS â†’ ECS Worker â†’ Aurora â†’ S3
-Cognito â†’ Lambda (authorizer) â†’ API Gateway
-EventBridge â†’ Lambda (scheduler) â†’ Aurora
+CloudFront → S3 (frontend assets)
+CloudFront → API Gateway → Lambda (user-service) → DynamoDB
+CloudFront → API Gateway → Lambda (report-service) → SQS → ECS Worker → Aurora → S3
+Cognito → Lambda (authorizer) → API Gateway
+EventBridge → Lambda (scheduler) → Aurora
 
 ````
 
@@ -171,9 +171,9 @@ EventBridge â†’ Lambda (scheduler) â†’ Aurora
 
 ## 7. RISK FLAGS
 List any ambiguities or decisions that need human input:
-1. âš ï¸  SOW mentions "reports" but it's unclear if PDF generation needs ECS or Lambda
-2. âš ï¸  No explicit mention of authentication â€” assuming Cognito User Pool
-3. âš ï¸  "High availability" mentioned â€” included multi-AZ for prod, confirm budget
+1. ⚠️  SOW mentions "reports" but it's unclear if PDF generation needs ECS or Lambda
+2. ⚠️  No explicit mention of authentication — assuming Cognito User Pool
+3. ⚠️  "High availability" mentioned — included multi-AZ for prod, confirm budget
 ...
 
 ---
@@ -260,70 +260,88 @@ from aws_cdk import (
 
 Claude uses these rules when analyzing the SOW:
 
-### Functional Requirement â†’ Service Mapping
+### Functional Requirement → Partial File Mapping
 ```
 
-"user login / authentication / JWT" â†’ Cognito User Pool + Identity Pool
-"file storage / upload / download" â†’ S3 + Lambda trigger + CloudFront signed URLs
-"real-time updates / live data" â†’ API Gateway WebSocket OR AppSync subscriptions
-"background processing / async jobs" â†’ SQS + Lambda OR SQS + ECS Fargate (if >15min)
-"scheduled tasks / cron" â†’ EventBridge Scheduler + Lambda
-"relational data / SQL / ACID" â†’ Aurora Serverless V2 (PostgreSQL)
-"fast lookups / session / cache" â†’ DynamoDB + ElastiCache Redis
-"search / full-text / faceted" â†’ OpenSearch Service
-"email notifications" â†’ Amazon SES + SNS
-"SMS / push notifications" â†’ Amazon SNS
-"workflow / saga / orchestration" â†’ Step Functions
-"reporting / analytics / BI" â†’ Athena + Glue + S3 + QuickSight
-"audit logs / compliance" â†’ CloudTrail + Config + GuardDuty
+--- Core Layers (always included) ---
+networking / VPC / subnets / security groups          → LAYER_NETWORKING.md
+IAM / KMS / Secrets Manager / GuardDuty               → LAYER_SECURITY.md
+Aurora / DynamoDB / S3 / Redis / SQS (any data store) → LAYER_DATA.md
+Lambda / microservices / scheduled tasks               → LAYER_BACKEND_LAMBDA.md
+CloudWatch / alarms / X-Ray / dashboards               → LAYER_OBSERVABILITY.md
+CodePipeline / CodeBuild / CICD stages                 → CICD_PIPELINE_STAGES.md
+
+--- Conditional App Layers ---
+"user login / authentication / JWT"                    → LAYER_API.md (Cognito User Pool + Identity Pool)
+"REST API / HTTP endpoints"                            → LAYER_API.md (API Gateway + Lambda + Cognito)
+"GraphQL / real-time subscriptions / websocket"        → LAYER_API_APPSYNC.md (AppSync + DynamoDB)
+"file storage / upload / download"                     → LAYER_DATA.md + EVENT_DRIVEN_PATTERNS.md (S3 + Lambda trigger + CloudFront signed URLs)
+"real-time updates / live data"                        → LAYER_API_APPSYNC.md (AppSync subscriptions)
+"background processing / async jobs / >15min"          → LAYER_BACKEND_ECS.md (ECS Fargate + SQS)
+"scheduled tasks / cron"                               → LAYER_BACKEND_LAMBDA.md (EventBridge Scheduler + Lambda)
+"event-driven / pub/sub / fan-out / decouple"          → EVENT_DRIVEN_PATTERNS.md (SNS → SQS fan-out)
+"ordered processing / exactly-once / FIFO"             → EVENT_DRIVEN_PATTERNS.md (SQS FIFO)
+"streaming / high-throughput / >1k events/sec"         → EVENT_DRIVEN_PATTERNS.md (Kinesis Data Streams + Firehose)
+"DynamoDB change / CDC / change data capture"          → EVENT_DRIVEN_PATTERNS.md (DynamoDB Streams → Lambda)
+"S3 trigger / file arrives → process"                  → EVENT_DRIVEN_PATTERNS.md (S3 Event Notifications)
+"workflow / saga / orchestration / multi-step approval" → WORKFLOW_STEP_FUNCTIONS.md (Step Functions)
+"frontend / web app / React / Next.js"                 → LAYER_FRONTEND.md (S3 + CloudFront + WAF + OAI)
+"relational data / SQL / ACID"                         → LAYER_DATA.md (Aurora Serverless V2 PostgreSQL)
+"fast lookups / session / cache"                       → LAYER_DATA.md (DynamoDB + ElastiCache Redis)
+"search / full-text / faceted"                         → LAYER_DATA.md (OpenSearch Service)
+"email notifications"                                  → LAYER_OBSERVABILITY.md (Amazon SES + SNS)
+"SMS / push notifications"                             → LAYER_OBSERVABILITY.md (Amazon SNS)
+"reporting / analytics / BI"                           → EVENT_DRIVEN_PATTERNS.md (Athena + Glue + S3 + QuickSight)
+"synthetic monitoring / canary / SLA / backup / cost"  → OPS_ADVANCED_MONITORING.md (Synthetics, Backup, Cost Anomaly)
+"audit logs / compliance"                              → LAYER_SECURITY.md (CloudTrail + Config + GuardDuty)
 
 --- MLOps / Data Science ---
-"data lake / raw data / feature engineering" â†’ MLOPS_DATA_PLATFORM.md (S3 4-zone + Glue + Athena)
-"data warehouse / Redshift / BI dashboards" â†’ MLOPS_DATA_PLATFORM.md (Redshift Serverless)
-"large-scale ETL / Spark / PySpark" â†’ MLOPS_DATA_PLATFORM.md (EMR Serverless)
-"lakehouse / Iceberg tables / ACID on S3 / MERGE INTO" → DATA_LAKEHOUSE_ICEBERG.md  (S3 Iceberg + Athena v3 DML)
-"Redshift Spectrum / federated query / data mesh" → DATA_LAKEHOUSE_ICEBERG.md  (cross-engine federated queries)
-"time travel / schema evolution / snapshot queries" → DATA_LAKEHOUSE_ICEBERG.md  (Iceberg time travel)
-"Lake Formation / column masking / row-level security" → DATA_LAKEHOUSE_ICEBERG.md  (fine-grained access control)
-"train ML model / SageMaker Pipelines" â†’ MLOPS_SAGEMAKER_TRAINING.md (Studio + Feature Store)
-"ML inference / model endpoint" â†’ MLOPS_SAGEMAKER_SERVING.md (real-time + auto-scaling)
-"LLM fine-tuning / LoRA / QLoRA / Llama / Mistral" â†’ MLOPS_PIPELINE_LLM_FINETUNING.md
-"NLP / BERT / text classification / NER / sentiment" â†’ MLOPS_PIPELINE_NLP_HUGGINGFACE.md
-"real-time fraud / <100ms scoring / Feature Store" â†’ MLOPS_PIPELINE_FRAUD_REALTIME.md
-"time series / demand forecast / DeepAR / Prophet" â†’ MLOPS_PIPELINE_TIMESERIES.md
-"computer vision / image detection / YOLOv8 / OCR" â†’ MLOPS_PIPELINE_COMPUTER_VISION.md
-"recommendations / collaborative filtering / personalization" â†’ MLOPS_PIPELINE_RECOMMENDATIONS.md
-"100 models / 1 model per tenant / SaaS ML" â†’ MLOPS_MULTI_MODEL_ENDPOINT.md
-"batch scoring / nightly predictions / offline ML" â†’ MLOPS_BATCH_TRANSFORM.md
-"SHAP / explainability / bias / EU AI Act" â†’ MLOPS_CLARIFY_EXPLAINABILITY.md
-"data labeling / annotation / active learning" â†’ MLOPS_GROUND_TRUTH.md
+"data lake / raw data / feature engineering"           → MLOPS_DATA_PLATFORM.md (S3 4-zone + Glue + Athena)
+"data warehouse / Redshift / BI dashboards"            → MLOPS_DATA_PLATFORM.md (Redshift Serverless)
+"large-scale ETL / Spark / PySpark"                    → MLOPS_DATA_PLATFORM.md (EMR Serverless)
+"lakehouse / Iceberg tables / ACID on S3 / MERGE INTO" → DATA_LAKEHOUSE_ICEBERG.md (S3 Iceberg + Athena v3 DML)
+"Redshift Spectrum / federated query / data mesh"      → DATA_LAKEHOUSE_ICEBERG.md (cross-engine federated queries)
+"time travel / schema evolution / snapshot queries"    → DATA_LAKEHOUSE_ICEBERG.md (Iceberg time travel)
+"Lake Formation / column masking / row-level security" → DATA_LAKEHOUSE_ICEBERG.md (fine-grained access control)
+"train ML model / SageMaker Pipelines"                 → MLOPS_SAGEMAKER_TRAINING.md (Studio + Feature Store)
+"ML inference / model endpoint"                        → MLOPS_SAGEMAKER_SERVING.md (real-time + auto-scaling)
+"LLM fine-tuning / LoRA / QLoRA / Llama / Mistral"    → MLOPS_PIPELINE_LLM_FINETUNING.md
+"NLP / BERT / text classification / NER / sentiment"   → MLOPS_PIPELINE_NLP_HUGGINGFACE.md
+"real-time fraud / <100ms scoring / Feature Store"     → MLOPS_PIPELINE_FRAUD_REALTIME.md
+"time series / demand forecast / DeepAR / Prophet"     → MLOPS_PIPELINE_TIMESERIES.md
+"computer vision / image detection / YOLOv8 / OCR"    → MLOPS_PIPELINE_COMPUTER_VISION.md
+"recommendations / collaborative filtering"            → MLOPS_PIPELINE_RECOMMENDATIONS.md
+"100 models / 1 model per tenant / SaaS ML"           → MLOPS_MULTI_MODEL_ENDPOINT.md
+"batch scoring / nightly predictions / offline ML"     → MLOPS_BATCH_TRANSFORM.md
+"SHAP / explainability / bias / EU AI Act"             → MLOPS_CLARIFY_EXPLAINABILITY.md
+"data labeling / annotation / active learning"         → MLOPS_GROUND_TRUTH.md
 
 --- LLMOps ---
-"LLM / Bedrock / generative AI / chatbot" â†’ LLMOPS_BEDROCK.md (Bedrock API + Guardrails + Gateway)
-"RAG / document Q&A / knowledge base" â†’ LLMOPS_BEDROCK.md (Knowledge Bases + OpenSearch)
-"AI agent / agentic / multi-step AI" â†’ LLMOPS_BEDROCK.md (Bedrock Agents)
-"multi-region / disaster recovery" â†’ Route53 + Global Accelerator + S3 CRR
+"LLM / Bedrock / generative AI / chatbot"              → LLMOPS_BEDROCK.md (Bedrock API + Guardrails + Gateway)
+"RAG / document Q&A / knowledge base"                  → LLMOPS_BEDROCK.md (Knowledge Bases + OpenSearch)
+"AI agent / agentic / multi-step AI"                   → LLMOPS_BEDROCK.md (Bedrock Agents)
+"multi-region / disaster recovery"                     → GLOBAL_MULTI_REGION.md (Route53 + Global Accelerator + S3 CRR)
 
 --- Enterprise Security ---
-"WAF / bot protection / DDoS / OWASP" â†’ SECURITY_WAF_SHIELD_MACIE.md (WAF v2 + Shield)
-"network firewall / IDS / IPS / egress filtering" â†’ SECURITY_WAF_SHIELD_MACIE.md (Network Firewall)
-"PII scanning / PHI in S3 / data classification" â†’ SECURITY_WAF_SHIELD_MACIE.md (Macie)
-"HIPAA / PCI DSS / SOC2 / FedRAMP" â†’ COMPLIANCE_HIPAA_PCIDSS.md
-"multi-region / active-active / <1 min RTO" â†’ GLOBAL_MULTI_REGION.md
+"WAF / bot protection / DDoS / OWASP"                  → SECURITY_WAF_SHIELD_MACIE.md (WAF v2 + Shield)
+"network firewall / IDS / IPS / egress filtering"      → SECURITY_WAF_SHIELD_MACIE.md (Network Firewall)
+"PII scanning / PHI in S3 / data classification"       → SECURITY_WAF_SHIELD_MACIE.md (Macie)
+"HIPAA / PCI DSS / SOC2 / FedRAMP"                    → COMPLIANCE_HIPAA_PCIDSS.md
+"multi-region / active-active / <1 min RTO"            → GLOBAL_MULTI_REGION.md
 
 --- Startup / SaaS Platform ---
-"Kubernetes / K8s / EKS / Helm / GitOps" â†’ PLATFORM_EKS_CLUSTER.md
-"Apache Kafka / MSK / Schema Registry" â†’ DATA_MSK_KAFKA.md
-"Prometheus / Grafana / OpenTelemetry / SLO" â†’ OBS_OPENTELEMETRY_GRAFANA.md
+"Kubernetes / K8s / EKS / Helm / GitOps"               → PLATFORM_EKS_CLUSTER.md
+"Apache Kafka / MSK / Schema Registry"                 → DATA_MSK_KAFKA.md
+"Prometheus / Grafana / OpenTelemetry / SLO"           → OBS_OPENTELEMETRY_GRAFANA.md
 
 ```
 
 ### Scale Tier Detection
 ```
 
-SOW mentions < 100 users/day â†’ small (serverless only, single AZ dev)
-SOW mentions 100-10k users/day â†’ medium (mix serverless + containers, 2 AZ prod)
-SOW mentions > 10k users/day â†’ large (containers primary, 3 AZ, Global Accelerator)
+SOW mentions < 100 users/day  → small (serverless only, single AZ dev)
+SOW mentions 100-10k users/day → medium (mix serverless + containers, 2 AZ prod)
+SOW mentions > 10k users/day  → large (containers primary, 3 AZ, Global Accelerator)
 
 ```
 
