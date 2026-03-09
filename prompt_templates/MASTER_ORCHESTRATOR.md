@@ -214,6 +214,13 @@ Use this table to decide which AWS services to include based on SOW keywords:
 | "RAG", "document Q&A", "knowledge base", "retrieval"        | Bedrock Knowledge Bases + OpenSearch vector store    | `LLMOPS_BEDROCK.md`                         |
 | "AI agent", "agentic", "multi-step AI", "tool use"          | Bedrock Agents + action group Lambda                 | `LLMOPS_BEDROCK.md`                         |
 | "PII in LLM", "content filtering", "safe AI"                | Bedrock Guardrails (PII redaction + topic blocking)  | `LLMOPS_BEDROCK.md`                         |
+| **— Strands Agentic AI —**                                  |                                                      |                                             |
+| "Strands SDK", "custom AI agent", "tool-use agent"          | Lambda/ECS agent host, DynamoDB sessions, S3 artifacts| `STRANDS_AGENT_RUNTIME.md`                  |
+| "agent chat UI", "conversational interface", "AI assistant UI"| WebSocket API GW v2, React chat, session mgmt       | `STRANDS_AGENT_FRONTEND.md`                 |
+| "AgentCore", "MCP tools", "agent memory", "STM/LTM"         | Cognito OAuth2, Gateway Lambda targets, Memory config| `STRANDS_AGENTCORE_DEPLOY.md`               |
+| "multi-agent", "supervisor agent", "agent orchestration"    | Strands multi-agent supervisor + worker pattern      | `STRANDS_AGENT_RUNTIME.md`                  |
+| "agent eval", "golden dataset", "prompt regression"         | Step Functions eval pipeline, LLM judge, CICD gate   | `STRANDS_AGENT_EVAL.md`                     |
+| "agent testing", "agent accuracy", "eval harness"           | S3 datasets, eval runner Lambda, score dashboard     | `STRANDS_AGENT_EVAL.md`                     |
 | **— Enterprise Security —**                                 |                                                      |                                             |
 | "WAF", "bot protection", "DDoS", "OWASP", "rate limiting"   | WAF v2 managed rules + Shield Advanced               | `SECURITY_WAF_SHIELD_MACIE.md`              |
 | "network firewall", "intrusion detection", "IDS/IPS"        | AWS Network Firewall + domain allowlist              | `SECURITY_WAF_SHIELD_MACIE.md`              |
@@ -255,6 +262,11 @@ When generating code, include these partials based on SOW detection:
 | `MLOPS_SAGEMAKER_TRAINING.md`            | ML         | Model training, Feature Store, Model Registry detected    |
 | `MLOPS_SAGEMAKER_SERVING.md`             | ML         | Model deployment, endpoints, drift monitoring detected    |
 | `LLMOPS_BEDROCK.md`                      | LLM        | Bedrock, RAG, LLM Gateway, AI agents detected             |
+| **— Strands Agentic AI —**               |            |                                                           |
+| `STRANDS_AGENT_RUNTIME.md`               | Agent      | Strands SDK, custom agents, tool-use, multi-agent detected |
+| `STRANDS_AGENT_FRONTEND.md`              | Agent+L5   | Agent chat UI, conversational interface, AI assistant UI   |
+| `STRANDS_AGENTCORE_DEPLOY.md`            | Agent      | AgentCore deployment, MCP tools, agent memory detected     |
+| `STRANDS_AGENT_EVAL.md`                 | Agent+CICD | Agent eval, golden datasets, prompt regression, quality gates |
 | **— Specialized SageMaker Pipelines —**  |            |                                                           |
 | `MLOPS_PIPELINE_LLM_FINETUNING.md`       | ML         | LLM fine-tuning, LoRA, QLoRA, Llama, Mistral detected     |
 | `MLOPS_PIPELINE_NLP_HUGGINGFACE.md`      | ML         | NLP, BERT, text classification, NER, sentiment detected   |
