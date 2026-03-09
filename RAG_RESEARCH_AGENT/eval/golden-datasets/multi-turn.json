@@ -1,0 +1,28 @@
+{
+  "dataset_name": "rag-research-agent-multi-turn",
+  "version": "1.0.0",
+  "description": "Multi-turn context retention tests",
+  "tags": ["multi-turn"],
+  "test_cases": [
+    {
+      "id": "mt-001", "tags": ["multi-turn", "context"],
+      "description": "Agent retains context across turns",
+      "input": {"messages": [
+        {"role": "user", "content": "I'm researching climate change impacts on agriculture"},
+        {"role": "user", "content": "What did I say I was researching?"}
+      ]},
+      "assertions": {"response_contains": ["climate", "agriculture"], "max_latency_ms": 10000,
+        "llm_judge": {"enabled": true, "criteria": "Correctly recalls the research topic", "min_score": 5}}
+    },
+    {
+      "id": "mt-002", "tags": ["multi-turn", "refinement"],
+      "description": "Agent handles follow-up refinement",
+      "input": {"messages": [
+        {"role": "user", "content": "Search for documents about machine learning"},
+        {"role": "user", "content": "Now narrow that down to just the ones about NLP"}
+      ]},
+      "assertions": {"max_latency_ms": 15000,
+        "llm_judge": {"enabled": true, "criteria": "Refines search based on follow-up", "min_score": 3}}
+    }
+  ]
+}

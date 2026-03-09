@@ -1,0 +1,28 @@
+# .bedrock_agentcore.yaml — AgentCore deployment configuration
+# Deploy: agentcore configure && agentcore launch
+
+agent:
+  name: "rag-research-agent"
+  description: "RAG-powered Research Agent using Strands SDK + Claude Sonnet 4.5"
+  entry_point: "src/strands_agent/agentcore_app.py"
+
+runtime:
+  python_version: "3.12"
+  requirements: "src/strands_agent/requirements.txt"
+
+memory:
+  enabled: true
+  mode: "agentcore"
+  strategies:
+    - SUMMARY
+    - USER_PREFERENCE
+    - SEMANTIC
+
+gateway:
+  enabled: true
+  auth: "oauth2"
+
+environment:
+  DEFAULT_MODEL_ID: "anthropic.claude-sonnet-4-20250514-v1:0"
+  FAST_MODEL_ID: "anthropic.claude-3-haiku-20240307-v1:0"
+  STAGE: "dev"

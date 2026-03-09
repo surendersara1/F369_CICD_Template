@@ -1,0 +1,22 @@
+{
+  "dataset_name": "rag-research-agent-multi-hop",
+  "version": "1.0.0",
+  "description": "Multi-hop reasoning — cross-document queries",
+  "tags": ["multi-hop"],
+  "test_cases": [
+    {
+      "id": "mh-001", "tags": ["multi-hop"],
+      "description": "Agent synthesizes info from multiple documents",
+      "input": {"messages": [{"role": "user", "content": "Compare the methodologies used in our 2024 and 2025 research papers"}]},
+      "assertions": {"tools_called": ["search_knowledge_base"], "max_latency_ms": 30000,
+        "llm_judge": {"enabled": true, "criteria": "References multiple documents and identifies differences", "min_score": 3}}
+    },
+    {
+      "id": "mh-002", "tags": ["multi-hop", "cross-ref"],
+      "description": "Agent cross-references claims across documents",
+      "input": {"messages": [{"role": "user", "content": "Do any of our documents contradict each other on the topic of data retention?"}]},
+      "assertions": {"max_latency_ms": 30000,
+        "llm_judge": {"enabled": true, "criteria": "Identifies potential contradictions or confirms consistency", "min_score": 3}}
+    }
+  ]
+}

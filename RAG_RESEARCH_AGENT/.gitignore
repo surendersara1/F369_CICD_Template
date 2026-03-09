@@ -1,0 +1,37 @@
+# CDK
+cdk.out/
+.cdk.staging/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Node (frontend)
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+frontend/.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SAM
+.aws-sam/

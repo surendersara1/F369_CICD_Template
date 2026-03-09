@@ -1,0 +1,26 @@
+{
+  "dataset_name": "rag-research-agent-tool-use",
+  "version": "1.0.0",
+  "description": "Tool-use correctness — right tool for right task",
+  "tags": ["tools"],
+  "test_cases": [
+    {
+      "id": "tool-001", "tags": ["tools", "save"],
+      "description": "Agent saves report when asked",
+      "input": {"messages": [{"role": "user", "content": "Generate a summary report of our research findings and save it"}]},
+      "assertions": {"tools_called": ["save_research_report"], "response_contains": ["s3://"], "max_latency_ms": 20000}
+    },
+    {
+      "id": "tool-002", "tags": ["tools", "entities"],
+      "description": "Agent extracts entities when asked",
+      "input": {"messages": [{"role": "user", "content": "Extract all people and organizations mentioned in our latest document"}]},
+      "assertions": {"tools_called": ["extract_entities"], "max_latency_ms": 15000}
+    },
+    {
+      "id": "tool-003", "tags": ["tools", "web"],
+      "description": "Agent uses web search for current info",
+      "input": {"messages": [{"role": "user", "content": "What are the latest developments in RAG technology this month?"}]},
+      "assertions": {"tools_called": ["web_search"], "max_latency_ms": 15000}
+    }
+  ]
+}
