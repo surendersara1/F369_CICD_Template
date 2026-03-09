@@ -473,6 +473,69 @@ class TestHandler:
 
 ---
 
+### STRANDS AGENT FILES (Conditional — if Strands SDK detected in Architecture Map)
+
+[Claude: generate these directories and files ONLY if the Architecture Map detects
+Strands SDK, AgentCore, agent chat UI, or agent eval. Reference the corresponding
+STRANDS_*.md partials for the actual code patterns.]
+
+#### `src/strands_agent/index.py`
+[Claude: generate from STRANDS_AGENT_RUNTIME.md — Agent Code Pattern section]
+
+#### `src/strands_agent/agentcore_app.py`
+[Claude: generate from STRANDS_AGENTCORE_DEPLOY.md — AgentCore Deployment Wrapper section.
+ Only if AgentCore deployment is detected.]
+
+#### `src/strands_agent/requirements.txt`
+```
+strands-agents>=0.1.0
+strands-agents-tools>=0.1.0
+bedrock-agentcore[strands-agents]>=0.1.0
+boto3>=1.35.0
+```
+
+#### `src/agent_frontend/ws_connect/index.py`
+[Claude: generate from STRANDS_AGENT_FRONTEND.md — ws_connect handler.
+ Only if agent chat UI is detected.]
+
+#### `src/agent_frontend/ws_message/index.py`
+[Claude: generate from STRANDS_AGENT_FRONTEND.md — ws_message handler.
+ Only if agent chat UI is detected.]
+
+#### `src/agent_frontend/ws_disconnect/index.py`
+[Claude: generate from STRANDS_AGENT_FRONTEND.md — ws_disconnect handler.
+ Only if agent chat UI is detected.]
+
+#### `src/agent_frontend/session_mgmt/index.py`
+[Claude: generate from STRANDS_AGENT_FRONTEND.md — session management handler.
+ Only if agent chat UI is detected.]
+
+#### `src/agent_eval/runner/index.py`
+[Claude: generate from STRANDS_AGENT_EVAL.md — Eval Runner Code section.
+ Only if agent eval is detected.]
+
+#### `src/agent_eval/prompt_regression.py`
+[Claude: generate from STRANDS_AGENT_EVAL.md — Prompt Regression Testing section.
+ Only if agent eval is detected.]
+
+#### `eval/golden-datasets/sample_dataset.json`
+[Claude: generate from STRANDS_AGENT_EVAL.md — Golden Dataset Format section.
+ Only if agent eval is detected.]
+
+#### `frontend/src/hooks/useAgentChat.ts`
+[Claude: generate from STRANDS_AGENT_FRONTEND.md — React Chat UI section.
+ Only if agent chat UI is detected.]
+
+#### `frontend/src/components/AgentChat.tsx`
+[Claude: generate from STRANDS_AGENT_FRONTEND.md — AgentChat component section.
+ Only if agent chat UI is detected.]
+
+#### `.bedrock_agentcore.yaml`
+[Claude: generate from STRANDS_AGENTCORE_DEPLOY.md — config file section.
+ Only if AgentCore deployment is detected.]
+
+---
+
 ### ECS FARGATE WORKER FILES
 
 #### `src/worker_task/main.py`
@@ -889,4 +952,9 @@ After generation, Claude verifies:
 - [ ] `src/worker_task/Dockerfile` is production-hardened (non-root, multi-stage)
 - [ ] `tests/unit/test_app_stack.py` tests all major resource types
 - [ ] `tests/smoke/test_smoke.py` covers API and frontend health
+- [ ] `src/strands_agent/` exists if Strands SDK agents were detected
+- [ ] `src/agent_frontend/` exists if agent chat UI was detected
+- [ ] `src/agent_eval/` exists if agent eval was detected
+- [ ] `eval/golden-datasets/` exists if agent eval was detected
+- [ ] `.bedrock_agentcore.yaml` exists if AgentCore deployment was detected
 - [ ] `README.md` is project-specific (not generic placeholder text)

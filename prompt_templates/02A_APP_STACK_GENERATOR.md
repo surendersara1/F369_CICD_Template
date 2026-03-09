@@ -105,6 +105,26 @@ class FullSystemStack(Stack):
         # === L6: OBSERVABILITY ===
         self._create_observability(stage_name)
 
+        # === STRANDS AGENT RUNTIME ===
+        # [Claude: include if Architecture Map detects Strands SDK, custom AI agents,
+        #  tool-use agents, multi-agent orchestration. Uses STRANDS_AGENT_RUNTIME.md]
+        # self._create_strands_agent_runtime(stage_name)
+
+        # === STRANDS AGENTCORE DEPLOYMENT ===
+        # [Claude: include if Architecture Map detects AgentCore, MCP tools,
+        #  agent memory (STM/LTM). Uses STRANDS_AGENTCORE_DEPLOY.md]
+        # self._create_strands_agentcore(stage_name)
+
+        # === STRANDS AGENT FRONTEND ===
+        # [Claude: include if Architecture Map detects agent chat UI,
+        #  conversational interface. Uses STRANDS_AGENT_FRONTEND.md]
+        # self._create_strands_agent_frontend(stage_name)
+
+        # === STRANDS AGENT EVAL ===
+        # [Claude: include if Architecture Map detects agent eval, golden datasets,
+        #  prompt regression testing. Uses STRANDS_AGENT_EVAL.md]
+        # self._create_strands_agent_eval(stage_name)
+
         # === OUTPUTS ===
         self._create_outputs()
 
@@ -191,6 +211,50 @@ class FullSystemStack(Stack):
         SQS dead-letter alarms. All alarms notify SNS topic.
         """
         # [GENERATE ALL OBSERVABILITY CODE FROM ARCHITECTURE MAP L6 SECTION]
+        # ...
+
+    # -------------------------------------------------------------------------
+    # STRANDS AGENT RUNTIME (Conditional — if Strands SDK detected)
+    # -------------------------------------------------------------------------
+    def _create_strands_agent_runtime(self, stage_name: str) -> None:
+        """
+        Strands SDK agentic AI runtime: Lambda/ECS agent hosts, IAM for Bedrock,
+        DynamoDB sessions, S3 artifacts, custom @tool definitions.
+        [Claude: generate from STRANDS_AGENT_RUNTIME.md partial]
+        """
+        # ...
+
+    # -------------------------------------------------------------------------
+    # STRANDS AGENTCORE (Conditional — if AgentCore detected)
+    # -------------------------------------------------------------------------
+    def _create_strands_agentcore(self, stage_name: str) -> None:
+        """
+        AgentCore deployment: Cognito OAuth2, Gateway MCP Lambda targets,
+        Memory config (STM + LTM), BedrockAgentCoreApp wrapper.
+        [Claude: generate from STRANDS_AGENTCORE_DEPLOY.md partial]
+        """
+        # ...
+
+    # -------------------------------------------------------------------------
+    # STRANDS AGENT FRONTEND (Conditional — if agent chat UI detected)
+    # -------------------------------------------------------------------------
+    def _create_strands_agent_frontend(self, stage_name: str) -> None:
+        """
+        Agent chat UI infra: WebSocket API GW v2, connection DynamoDB,
+        REST session management, frontend config injection.
+        [Claude: generate from STRANDS_AGENT_FRONTEND.md partial]
+        """
+        # ...
+
+    # -------------------------------------------------------------------------
+    # STRANDS AGENT EVAL (Conditional — if agent eval detected)
+    # -------------------------------------------------------------------------
+    def _create_strands_agent_eval(self, stage_name: str) -> None:
+        """
+        Agent evaluation pipeline: golden dataset S3, eval runner Lambda,
+        Step Functions orchestration, LLM-as-judge, CloudWatch score dashboard.
+        [Claude: generate from STRANDS_AGENT_EVAL.md partial]
+        """
         # ...
 
     # -------------------------------------------------------------------------

@@ -319,7 +319,16 @@ CodePipeline / CodeBuild / CICD stages                 → CICD_PIPELINE_STAGES.
 --- LLMOps ---
 "LLM / Bedrock / generative AI / chatbot"              → LLMOPS_BEDROCK.md (Bedrock API + Guardrails + Gateway)
 "RAG / document Q&A / knowledge base"                  → LLMOPS_BEDROCK.md (Knowledge Bases + OpenSearch)
-"AI agent / agentic / multi-step AI"                   → LLMOPS_BEDROCK.md (Bedrock Agents)
+"AI agent / agentic / multi-step AI" (managed Bedrock)  → LLMOPS_BEDROCK.md (Bedrock Agents)
+
+--- Strands Agentic AI ---
+"Strands SDK / custom AI agent / tool-use agent"       → STRANDS_AGENT_RUNTIME.md (Agent runtime, @tool, multi-agent)
+"multi-agent / supervisor agent / agent orchestration"  → STRANDS_AGENT_RUNTIME.md (Supervisor + worker pattern)
+"AgentCore / MCP tools / agent memory / STM / LTM"     → STRANDS_AGENTCORE_DEPLOY.md (AgentCore deploy + Gateway + Memory)
+"agent chat UI / conversational interface / AI assistant UI" → STRANDS_AGENT_FRONTEND.md (WebSocket streaming + React chat)
+"agent eval / golden dataset / prompt regression"       → STRANDS_AGENT_EVAL.md (Eval harness + LLM judge + CICD gate)
+"agent testing / agent accuracy / eval harness"         → STRANDS_AGENT_EVAL.md (Step Functions eval pipeline)
+
 "multi-region / disaster recovery"                     → GLOBAL_MULTI_REGION.md (Route53 + Global Accelerator + S3 CRR)
 
 --- Enterprise Security ---

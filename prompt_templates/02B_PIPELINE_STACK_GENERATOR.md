@@ -285,6 +285,24 @@ class PipelineStack(Stack):
         )
 
         # =====================================================================
+        # STAGE 4.5: AGENT EVAL GATE (Conditional — if Strands agents detected)
+        # [Claude: include this step if Architecture Map detects Strands agents.
+        #  Uses STRANDS_AGENT_EVAL.md partial. Runs golden dataset eval against
+        #  staging agent and blocks prod deploy if score < threshold.]
+        # =====================================================================
+        # agent_eval_step = pipelines.ShellStep(
+        #     "AgentEvalGate",
+        #     commands=[
+        #         "pip install boto3",
+        #         "EXEC_ARN=$(aws stepfunctions start-execution"
+        #         "  --state-machine-arn $EVAL_STATE_MACHINE_ARN"
+        #         "  --input '{\"eval_run_id\": \"cicd-'$CODEBUILD_BUILD_NUMBER'\"}'
+        #         "  --query 'executionArn' --output text)",
+        #         "# Poll until complete (see STRANDS_AGENT_EVAL.md for full script)",
+        #     ],
+        # )
+
+        # =====================================================================
         # STAGE 5: PRODUCTION ENVIRONMENT (With rollback)
         # =====================================================================
         prod_stage = pipeline.add_stage(
