@@ -1,205 +1,303 @@
-# PARTIAL: AgentCore Runtime — Managed Serverless Agent Hosting
+# PARTIAL: AgentCore Runtime — Managed Serverless Agent & MCP Server Hosting
 
-**Usage:** Include when SOW mentions AgentCore Runtime, managed agent hosting, serverless agent deployment, microVM isolation, or auto-scaling agent sessions.
+**Usage:** Include when SOW mentions AgentCore Runtime, managed agent hosting, MCP server hosting, microVM isolation, or auto-scaling agent/tool sessions.
 
 ---
 
 ## AgentCore Runtime Overview
 
 ```
-AgentCore Runtime = AWS-managed serverless runtime for AI agents:
-  - Dedicated microVM per user session (complete isolation)
+AgentCore Runtime = AWS-managed serverless runtime for AI agents AND MCP servers:
+  - Dedicated microVM per session (complete isolation)
   - 8-hour session persistence window
   - Auto-scales to thousands of sessions in seconds
-  - Supports Strands, LangChain, LangGraph, CrewAI
-  - Supports MCP and A2A protocols
-  - Any model from any provider (Bedrock, OpenAI, Gemini, etc.)
+  - Two protocol modes:
+    ProtocolType.HTTP  → Agent runtimes (Strands agents, LangChain, etc.)
+    ProtocolType.MCP   → MCP server runtimes (tool servers: Redshift, Neptune, etc.)
+  - ARM64 Graviton containers (cost optimized)
+  - VPC connectivity for private data sources
   - Pay only for actual compute usage
 
-Session Lifecycle:
-  agentcore configure → agentcore dev (local) → agentcore launch (deploy)
-       ↓
-  User Request → AgentCore Runtime → microVM (isolated session)
-       ↓                                    ↓
-  Session persists up to 8 hours     Agent state preserved
-       ↓                                    ↓
-  Mcp-Session-Id header for continuity   Auto-scales horizontally
+Architecture Pattern (from real production):
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  CDK App (TypeScript)                                               │
+  │                                                                     │
+  │  MS00-Bootstrap → MS01-Network → MS02-Identity → MS03-DataFoundation│
+  │       ↓                                                             │
+  │  MS04-AgentcoreRuntime  ← MCP server runtimes (Redshift, Neptune,  │
+  │       ↓                    OpenSearch, Aurora, SQLite, Mock)         │
+  │  MS05-Gateway           ← Lambda proxy targets + direct Lambda tools│
+  │       ↓                                                             │
+  │  Agent-Observer  ┐                                                  │
+  │  Agent-Reasoner  ├─ Per-agent stacks (independently deployable)     │
+  │  Agent-Governance┘                                                  │
+  │       ↓                                                             │
+  │  Agent-Supervisor       ← Orchestrates all sub-agents               │
+  │       ↓                                                             │
+  │  MS07-Memory → MS08-Governance → MS09-Portal → MS10-Observability  │
+  └─────────────────────────────────────────────────────────────────────┘
+
+Key Insight: Each agent = its own CDK stack. Add 100 agents = add 100 stacks.
+             Each MCP server = its own AgentCore Runtime with ProtocolType.MCP.
+             Gateway routes tool calls to MCP Runtimes via Lambda proxy pattern.
 ```
 
 ---
 
-## CDK Code Block — AgentCore Runtime Supporting Infrastructure
-
-```python
-def _create_agentcore_runtime(self, stage_name: str) -> None:
-    """
-    AgentCore Runtime supporting infrastructure.
-
-    Components:
-      A) IAM Role for AgentCore Runtime (Bedrock model access, tool permissions)
-      B) S3 bucket for agent artifacts (tool outputs, traces)
-      C) SSM parameters for runtime configuration
-      D) CloudWatch log group for agent runtime logs
-
-    [Claude: AgentCore Runtime itself is managed by AWS — this CDK creates
-     the supporting IAM, storage, and config that the runtime needs.
-     The agent code is deployed via `agentcore launch` CLI, not CDK.]
-    """
-
-    # =========================================================================
-    # A) IAM ROLE — AgentCore Runtime Execution
-    # =========================================================================
-
-    self.agentcore_runtime_role = iam.Role(
-        self, "AgentCoreRuntimeRole",
-        assumed_by=iam.CompositePrincipal(
-            iam.ServicePrincipal("bedrock.amazonaws.com"),
-            iam.ServicePrincipal("lambda.amazonaws.com"),
-        ),
-        role_name=f"{{project_name}}-agentcore-runtime-{stage_name}",
-        managed_policies=[
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
-        ],
-    )
-
-    # Bedrock model invocation (all foundation models the agent may use)
-    self.agentcore_runtime_role.add_to_policy(
-        iam.PolicyStatement(
-            sid="BedrockModelInvoke",
-            actions=[
-                "bedrock:InvokeModel",
-                "bedrock:InvokeModelWithResponseStream",
-            ],
-            resources=[
-                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.*",
-                f"arn:aws:bedrock:{self.region}::foundation-model/amazon.*",
-                f"arn:aws:bedrock:{self.region}::foundation-model/meta.*",
-            ],
-        )
-    )
-
-    # =========================================================================
-    # B) S3 — Agent Artifacts Bucket
-    # =========================================================================
-
-    self.agent_artifacts_bucket = s3.Bucket(
-        self, "AgentArtifactsBucket",
-        bucket_name=f"{{project_name}}-agent-artifacts-{stage_name}-{self.account}",
-        encryption=s3.BucketEncryption.KMS,
-        encryption_key=self.kms_key,
-        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-        enforce_ssl=True,
-        versioned=True,
-        lifecycle_rules=[
-            s3.LifecycleRule(id="expire-old-artifacts", expiration=Duration.days(90)),
-        ],
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
-        auto_delete_objects=stage_name != "prod",
-    )
-    self.agent_artifacts_bucket.grant_read_write(self.agentcore_runtime_role)
-
-    # =========================================================================
-    # C) SSM — Runtime Configuration
-    # =========================================================================
-
-    ssm.StringParameter(
-        self, "AgentCoreRuntimeConfig",
-        parameter_name=f"/{{project_name}}/{stage_name}/agentcore/runtime-config",
-        string_value=json.dumps({
-            "default_model_id": "anthropic.claude-sonnet-4-20250514-v1:0",
-            "fast_model_id": "anthropic.claude-3-haiku-20240307-v1:0",
-            "session_ttl_hours": 8,
-            "max_turns": 30,
-            "artifacts_bucket": f"{{project_name}}-agent-artifacts-{stage_name}-{self.account}",
-        }),
-        description="AgentCore Runtime configuration",
-    )
-
-    # =========================================================================
-    # D) CLOUDWATCH — Runtime Logs
-    # =========================================================================
-
-    logs.LogGroup(
-        self, "AgentCoreRuntimeLogs",
-        log_group_name=f"/{{project_name}}/{stage_name}/agentcore-runtime",
-        retention=logs.RetentionDays.ONE_MONTH if stage_name != "prod" else logs.RetentionDays.ONE_YEAR,
-        removal_policy=RemovalPolicy.DESTROY,
-    )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "AgentCoreRuntimeRoleArn",
-        value=self.agentcore_runtime_role.role_arn,
-        description="IAM Role ARN for AgentCore Runtime",
-    )
-```
-
----
-
-## `.bedrock_agentcore.yaml` — Agent Configuration
-
-```yaml
-# .bedrock_agentcore.yaml — AgentCore deployment configuration
-agent:
-  name: "{{project_name}}-agent"
-  description: "Strands-based agent for {{project_name}}"
-  entry_point: "src/strands_agent/agentcore_app.py"
-
-runtime:
-  python_version: "3.12"
-  requirements: "src/strands_agent/requirements.txt"
-
-environment:
-  DEFAULT_MODEL_ID: "anthropic.claude-sonnet-4-20250514-v1:0"
-  STAGE: "dev"
-```
-
----
-
-## AgentCore App Wrapper — Pass 3 Reference
-
-```python
-"""AgentCore entrypoint wrapper for Strands agent."""
-from bedrock_agentcore import BedrockAgentCoreApp
-from strands import Agent
-from strands.models import BedrockModel
-import os
-
-app = BedrockAgentCoreApp()
-
-@app.entrypoint
-def invoke(payload: dict) -> dict:
-    """AgentCore managed entrypoint."""
-    model = BedrockModel(
-        model_id=os.environ.get("DEFAULT_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0"),
-    )
-    agent = Agent(
-        model=model,
-        system_prompt="You are a helpful AI assistant for {{project_name}}.",
-        tools=[],  # [Claude: add tools based on SOW]
-    )
-    response = agent(payload.get("message", ""))
-    return {"response": str(response)}
-
-if __name__ == "__main__":
-    app.run()
-```
-
----
-
-## CLI Deployment Commands
+## CDK L2 Alpha Construct — `@aws-cdk/aws-bedrock-agentcore-alpha`
 
 ```bash
-# First-time setup
-agentcore configure
+npm install @aws-cdk/aws-bedrock-agentcore-alpha
+```
 
-# Local development testing
-agentcore dev
+---
 
-# Deploy to AgentCore Runtime
-agentcore launch
+## Reusable AgentRuntime Construct — Pass 2A Reference
 
-# Test invocation
-agentcore invoke --payload '{"message": "Hello"}'
+This is the core reusable construct. Every agent stack uses it.
+
+```typescript
+// infra/lib/constructs/agent-runtime.ts
+import * as cdk from 'aws-cdk-lib';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
+import { RuntimeNetworkConfiguration } from '@aws-cdk/aws-bedrock-agentcore-alpha';
+import { Construct } from 'constructs';
+
+export interface AgentRuntimeProps {
+  agentName: string;       // e.g. 'supervisor', 'observer'
+  runtimeName: string;     // e.g. 'supervisor_agent_v4'
+  ssmOutputPath: string;   // e.g. '/{{project_name}}/agents/supervisor_agent_arn'
+  environmentVariables?: Record<string, string>;
+  additionalPolicies?: iam.PolicyStatement[];
+}
+
+export class AgentRuntime extends Construct {
+  public readonly runtime: agentcore.Runtime;
+  public readonly executionRole: iam.Role;
+
+  constructor(scope: Construct, id: string, props: AgentRuntimeProps) {
+    super(scope, id);
+
+    const { agentName, runtimeName, ssmOutputPath } = props;
+
+    // Import VPC from foundation stacks via SSM
+    const vpc = ec2.Vpc.fromVpcAttributes(this, 'ImportedVpc', {
+      vpcId: ssmLookup(this, '/{{project_name}}/network/vpc_id'),
+      availabilityZones: [/* from context */],
+      privateSubnetIds: [/* from SSM */],
+    });
+
+    // Per-agent execution role (least privilege)
+    this.executionRole = new iam.Role(this, 'ExecutionRole', {
+      roleName: `{{project_name}}-${agentName}-role`,
+      assumedBy: new iam.CompositePrincipal(
+        new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+        new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      ),
+    });
+
+    // Base permissions all agents need
+    this.executionRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+      resources: [`arn:aws:bedrock:${cdk.Aws.REGION}::foundation-model/*`],
+    }));
+
+    this.executionRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+      resources: [`arn:aws:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/{{project_name}}/*`],
+    }));
+
+    // Agent-specific policies
+    if (props.additionalPolicies) {
+      for (const policy of props.additionalPolicies) {
+        this.executionRole.addToPolicy(policy);
+      }
+    }
+
+    // Docker container artifact — build from agents/ directory
+    const artifact = agentcore.AgentRuntimeArtifact.fromAsset('agents/', {
+      platform: assets.Platform.LINUX_ARM64,
+      file: `${agentName}/Dockerfile`,
+    });
+
+    // AgentCore Runtime (HTTP protocol for agents)
+    this.runtime = new agentcore.Runtime(this, 'Runtime', {
+      runtimeName,
+      agentRuntimeArtifact: artifact,
+      executionRole: this.executionRole,
+      description: `{{project_name}} ${agentName} agent`,
+      protocolConfiguration: agentcore.ProtocolType.HTTP,
+      networkConfiguration: RuntimeNetworkConfiguration.usingVpc(this, {
+        vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      }),
+      environmentVariables: {
+        CLIENT_ID: '{{client_id}}',
+        AWS_DEFAULT_REGION: '{{aws_region}}',
+        ...props.environmentVariables,
+      },
+    });
+
+    // Export runtime ARN to SSM for cross-stack reference
+    new ssm.StringParameter(this, `Ssm${agentName}Arn`, {
+      parameterName: ssmOutputPath,
+      stringValue: this.runtime.agentRuntimeArn,
+    });
+  }
+}
+```
+
+---
+
+## MCP Server Runtimes — Pass 2A Reference
+
+MCP servers deployed as AgentCore Runtimes with `ProtocolType.MCP`:
+
+```typescript
+// infra/lib/stacks/runtimes/ms-04-agentcore-runtime-stack.ts
+
+// Shared execution role for all MCP server runtimes
+const mcpRuntimeRole = new iam.Role(this, 'McpRuntimeRole', {
+  assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+});
+
+// [Claude: add permissions based on SOW data sources — Redshift, Neptune, etc.]
+
+// MCP Server definitions — one Runtime per data source
+const mcpServers = [
+  {
+    id: 'RedshiftMcp',
+    name: 'redshift-mcp',
+    dockerDir: 'infra/containers/redshift-mcp',
+    ssmEndpointKey: 'redshift_mcp_endpoint',
+    description: 'Redshift MCP Server — financial analytics tools',
+    envVars: {
+      REDSHIFT_WORKGROUP: '{{project_name}}-wg',
+      REDSHIFT_DB: '{{project_name}}_warehouse',
+      REDSHIFT_IAM_AUTH: 'true',
+    },
+  },
+  // [Claude: add more MCP servers per SOW data sources:
+  //  neptune-mcp, opensearch-mcp, aurora-mcp, sqlite-mcp, etc.]
+];
+
+for (const server of mcpServers) {
+  const artifact = agentcore.AgentRuntimeArtifact.fromAsset(server.dockerDir, {
+    platform: assets.Platform.LINUX_ARM64,
+  });
+
+  const runtime = new agentcore.Runtime(this, `${server.id}Runtime`, {
+    runtimeName: `{{project_name}}_${server.name.replace(/-/g, '_')}`,
+    agentRuntimeArtifact: artifact,
+    executionRole: mcpRuntimeRole,
+    description: server.description,
+    protocolConfiguration: agentcore.ProtocolType.MCP,  // ← MCP protocol
+    networkConfiguration: RuntimeNetworkConfiguration.usingVpc(this, {
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+    }),
+    environmentVariables: server.envVars,
+  });
+
+  // Export Runtime ARN to SSM — Gateway reads these
+  ssmPut(this, `Ssm${server.id}Arn`,
+    `/{{project_name}}/runtime/${server.ssmEndpointKey}`,
+    runtime.agentRuntimeArn);
+}
+```
+
+---
+
+## Per-Agent Stack Pattern — Pass 2A Reference
+
+Each agent is its own independently deployable CDK stack:
+
+```typescript
+// infra/lib/stacks/agents/observer-stack.ts
+import { AgentRuntime } from '../../constructs/agent-runtime';
+
+export class ObserverAgentStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props: AgentStackProps) {
+    super(scope, id, props);
+
+    new AgentRuntime(this, 'Observer', {
+      agentName: 'observer',
+      runtimeName: 'observer_agent_v3',
+      ssmOutputPath: '/{{project_name}}/agents/observer_agent_arn',
+      environmentVariables: {
+        GATEWAY_URL: ssmLookup(this, '/{{project_name}}/mcp/gateway_endpoint'),
+      },
+      additionalPolicies: [
+        new iam.PolicyStatement({
+          actions: ['bedrock-agentcore:InvokeGateway'],
+          resources: ['*'],
+        }),
+      ],
+    });
+  }
+}
+```
+
+---
+
+## CDK App Entry — Stack Dependency Graph
+
+```typescript
+// infra/bin/app.ts
+// LAYER 1: Foundation (deploy first, rarely changes)
+const ms00 = new BootstrapStack(app, 'MS00-Bootstrap', { env });
+const ms01 = new NetworkStack(app, 'MS01-Network', { env });
+const ms02 = new IdentityStack(app, 'MS02-Identity', { env });
+const ms03 = new DataFoundationStack(app, 'MS03-DataFoundation', { env });
+
+// LAYER 2: MCP Runtimes
+const ms04 = new AgentcoreRuntimeStack(app, 'MS04-AgentcoreRuntime', { env });
+ms04.addDependency(ms01); ms04.addDependency(ms02);
+
+// LAYER 3: Gateway
+const ms05 = new GatewayStack(app, 'MS05-Gateway', { env });
+ms05.addDependency(ms04);
+
+// LAYER 4: Agents (independently deployable)
+const agentObserver = new ObserverAgentStack(app, 'Agent-Observer', { env });
+agentObserver.addDependency(ms05);
+
+const agentReasoner = new ReasonerAgentStack(app, 'Agent-Reasoner', { env });
+agentReasoner.addDependency(ms05);
+
+const agentSupervisor = new SupervisorAgentStack(app, 'Agent-Supervisor', { env });
+agentSupervisor.addDependency(agentObserver);
+agentSupervisor.addDependency(agentReasoner);
+
+// LAYER 5+: Memory, Governance, Portal, Observability, CICD
+```
+
+---
+
+## Agent Dockerfile — Pass 3 Reference
+
+```dockerfile
+# agents/observer/Dockerfile
+FROM python:3.13-slim
+WORKDIR /app
+COPY shared/ ./shared/
+COPY observer/ ./observer/
+COPY observer/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-m", "observer.agent"]
+```
+
+---
+
+## requirements.txt (per agent)
+
+```
+strands-agents>=0.1.0
+strands-agents-tools>=0.1.0
+bedrock-agentcore>=0.1.0
+boto3>=1.35.0
 ```

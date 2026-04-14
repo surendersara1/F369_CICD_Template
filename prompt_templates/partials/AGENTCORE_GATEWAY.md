@@ -1,149 +1,316 @@
-# PARTIAL: AgentCore Gateway — MCP Endpoint for External Tools
+# PARTIAL: AgentCore Gateway — MCP Endpoint, Lambda Targets, Runtime Proxy
 
-**Usage:** Include when SOW mentions AgentCore Gateway, MCP server/tools, tool gateway, Lambda tool targets, or external tool access via MCP protocol.
+**Usage:** Include when SOW mentions AgentCore Gateway, MCP tools, tool gateway, Lambda tool targets, or MCP Runtime proxy pattern.
 
 ---
 
 ## AgentCore Gateway Overview
 
 ```
-AgentCore Gateway = MCP endpoint exposing tools to agents:
-  - Lambda targets (each Lambda = one or more MCP tools)
-  - OAuth2 secured via AgentCore Identity (Cognito)
-  - Streamable HTTP transport for MCP clients
-  - AWS IAM auth via mcp-proxy-for-aws package
-  - Supports OpenAPI, Smithy, and MCP Server target types
+AgentCore Gateway = Unified MCP endpoint for all agent tools:
+  - CfnGateway (AWS::BedrockAgentCore::Gateway) with IAM or OAuth2 auth
+  - CfnGatewayTarget per tool group (Lambda or MCP Runtime)
+  - Tool schemas defined inline or loaded from JSON files
+  - Two target patterns:
+    1. Direct Lambda: Gateway → Lambda (tool logic in Lambda)
+    2. Runtime Proxy: Gateway → Lambda proxy → AgentCore Runtime (MCP server)
 
-Gateway Flow:
-  Strands Agent → MCPClient (streamable HTTP) → AgentCore Gateway
-       ↓                                              ↓
-  OAuth2 Token (Cognito) or IAM SigV4        Lambda Target (tool execution)
-       ↓                                              ↓
-  Tool results returned to agent              DynamoDB / S3 / external APIs
+Architecture (from real production):
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  AgentCore Gateway (MCP protocol, IAM auth)                         │
+  │                                                                     │
+  │  Target: neptune-graph-fn ──→ Lambda (direct)                       │
+  │  Target: monte-carlo-fn  ──→ Lambda (direct)                        │
+  │  Target: variance-decomp ──→ Lambda (direct)                        │
+  │  Target: forecast-metric ──→ Lambda (direct)                        │
+  │                                                                     │
+  │  Target: redshift-mcp-proxy ──→ Lambda proxy ──→ AgentCore Runtime  │
+  │  Target: neptune-mcp-proxy  ──→ Lambda proxy ──→ AgentCore Runtime  │
+  │  Target: opensearch-mcp-proxy→ Lambda proxy ──→ AgentCore Runtime   │
+  │  Target: aurora-mcp-proxy   ──→ Lambda proxy ──→ AgentCore Runtime  │
+  └─────────────────────────────────────────────────────────────────────┘
+
+Agent connects via:
+  Strands Agent → MCPClient(sigv4_transport(gateway_url)) → Gateway → Tools
 ```
 
 ---
 
-## CDK Code Block — AgentCore Gateway Infrastructure
+## CDK Code Block — Gateway Stack
 
-```python
-def _create_agentcore_gateway(self, stage_name: str) -> None:
-    """
-    AgentCore Gateway — MCP tool endpoint infrastructure.
+```typescript
+// infra/lib/stacks/gateway/ms-05-gateway-stack.ts
+import { aws_bedrockagentcore as agentcore } from 'aws-cdk-lib';
 
-    Components:
-      A) Lambda tool targets (tools exposed via Gateway)
-      B) Gateway configuration (SSM for CLI setup)
-      C) IAM permissions for Bedrock to invoke tool Lambdas
+// ======================================================================
+// Gateway IAM Role
+// ======================================================================
+const gatewayRole = new iam.Role(this, 'GatewayRole', {
+  assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+});
 
-    [Claude: include when SOW mentions MCP tools, external tool access,
-     or AgentCore Gateway. Generate one Lambda per tool group from SOW.]
-    """
+gatewayRole.addToPolicy(new iam.PolicyStatement({
+  actions: ['lambda:InvokeFunction'],
+  resources: [`arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:function:{{project_name}}-*`],
+}));
 
-    # =========================================================================
-    # A) LAMBDA TOOL TARGETS
-    # =========================================================================
+// PolicyEngine permissions (for Cedar RBAC — see AGENTCORE_AGENT_CONTROL.md)
+gatewayRole.addToPolicy(new iam.PolicyStatement({
+  sid: 'PolicyEngineAccess',
+  actions: [
+    'bedrock-agentcore:GetPolicyEngine',
+    'bedrock-agentcore:AuthorizeAction',
+    'bedrock-agentcore:PartiallyAuthorizeActions',
+  ],
+  resources: [
+    `arn:aws:bedrock-agentcore:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:policy-engine/*`,
+    `arn:aws:bedrock-agentcore:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:gateway/*`,
+  ],
+}));
 
-    self.gateway_tool_lambdas = {}
+// ======================================================================
+// AgentCore Gateway (CfnGateway L1)
+// ======================================================================
+const gateway = new agentcore.CfnGateway(this, 'McpGateway', {
+  name: `{{project_name}}-gateway`,
+  authorizerType: 'AWS_IAM',
+  protocolType: 'MCP',
+  roleArn: gatewayRole.roleArn,
+  description: 'Unified MCP tool endpoint for all agents',
+});
+```
 
-    # [Claude: generate one Lambda per tool group detected in SOW]
-    db_tool_fn = _lambda.Function(
-        self, "GatewayToolDB",
-        function_name=f"{{project_name}}-gateway-tool-db-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_13,
-        architecture=_lambda.Architecture.ARM_64,
-        handler="index.handler",
-        code=_lambda.Code.from_asset("src/gateway_tools/db_tool"),
-        environment={"STAGE": stage_name},
-        timeout=Duration.seconds(30),
-        memory_size=256,
-        vpc=self.vpc,
-        vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-        security_groups=[self.lambda_sg],
-    )
-    self.gateway_tool_lambdas["db_tool"] = db_tool_fn
+---
 
-    api_tool_fn = _lambda.Function(
-        self, "GatewayToolAPI",
-        function_name=f"{{project_name}}-gateway-tool-api-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_13,
-        architecture=_lambda.Architecture.ARM_64,
-        handler="index.handler",
-        code=_lambda.Code.from_asset("src/gateway_tools/api_tool"),
-        environment={"STAGE": stage_name},
-        timeout=Duration.seconds(30),
-        memory_size=256,
-    )
-    self.gateway_tool_lambdas["api_tool"] = api_tool_fn
+## Pattern 1: Direct Lambda Target
 
-    # =========================================================================
-    # B) IAM — Allow Bedrock/AgentCore to invoke tool Lambdas
-    # =========================================================================
+For tools where logic runs directly in Lambda (no MCP Runtime needed):
 
-    for tool_name, tool_fn in self.gateway_tool_lambdas.items():
-        tool_fn.add_permission(
-            f"AgentCoreInvoke-{tool_name}",
-            principal=iam.ServicePrincipal("bedrock.amazonaws.com"),
-            action="lambda:InvokeFunction",
-        )
+```typescript
+// Direct Lambda function (e.g., Monte Carlo simulation)
+const monteCarloFn = new lambda.Function(this, 'MonteCarloFn', {
+  functionName: `{{project_name}}-monte-carlo`,
+  runtime: lambda.Runtime.PYTHON_3_13,
+  architecture: lambda.Architecture.ARM_64,
+  handler: 'index.handler',
+  code: lambda.Code.fromAsset('lambda/monte_carlo_sim'),
+  timeout: cdk.Duration.seconds(300),
+  memorySize: 2048,
+  vpc, vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+});
 
-    # =========================================================================
-    # C) GATEWAY CONFIG — SSM for CLI setup
-    # =========================================================================
+// Grant Gateway + resource-based permission (both required)
+monteCarloFn.grantInvoke(gatewayRole);
+monteCarloFn.addPermission('AllowAgentCoreInvoke', {
+  principal: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+  action: 'lambda:InvokeFunction',
+  sourceAccount: cdk.Aws.ACCOUNT_ID,
+});
 
-    ssm.StringParameter(
-        self, "AgentCoreGatewayConfig",
-        parameter_name=f"/{{project_name}}/{stage_name}/agentcore/gateway-config",
-        string_value=json.dumps({
-            "gateway_name": f"{{project_name}}-gateway-{stage_name}",
-            "auth": {
-                "type": "OAUTH2",
-                "cognito_user_pool_id": self.agentcore_user_pool.user_pool_id,
-                "cognito_app_client_id": self.agentcore_app_client.user_pool_client_id,
+// Gateway Target with inline tool schema
+const target = new agentcore.CfnGatewayTarget(this, 'MonteCarloTarget', {
+  name: 'monte-carlo-fn',
+  gatewayIdentifier: gateway.attrGatewayIdentifier,
+  credentialProviderConfigurations: [
+    { credentialProviderType: 'GATEWAY_IAM_ROLE' },
+  ],
+  targetConfiguration: {
+    mcp: {
+      lambda: {
+        lambdaArn: monteCarloFn.functionArn,
+        toolSchema: {
+          inlinePayload: [
+            {
+              name: 'run_monte_carlo_simulation',
+              description: 'Run Monte Carlo simulation for P&L projections',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  iterations: { type: 'number', description: 'Simulation iterations (default 500)' },
+                  scenario: { type: 'string', description: 'Scenario name' },
+                },
+              },
             },
-            "targets": [
-                {"name": name, "type": "LAMBDA", "lambda_arn": fn.function_arn}
-                for name, fn in self.gateway_tool_lambdas.items()
-            ],
-        }),
-        description="AgentCore Gateway configuration for CLI setup",
-    )
+          ],
+        },
+      },
+    },
+  },
+});
+target.addDependency(gateway);
 ```
 
 ---
 
-## MCP Client Connection — Pass 3 Reference
+## Pattern 2: Lambda Proxy → AgentCore Runtime (MCP Server)
+
+For tools backed by MCP servers running on AgentCore Runtime:
+
+```typescript
+// Shared proxy role for all MCP Runtime proxy Lambdas
+const proxyRole = new iam.Role(this, 'McpProxyRole', {
+  assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+  managedPolicies: [
+    iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+  ],
+});
+
+proxyRole.addToPolicy(new iam.PolicyStatement({
+  actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+  resources: [/* MCP Runtime ARNs from SSM */],
+}));
+
+// MCP proxy definitions — one per MCP Runtime
+const mcpProxies = [
+  {
+    id: 'Redshift',
+    targetName: 'redshift-mcp-proxy',
+    runtimeSsmKey: 'redshift_mcp_endpoint',
+    schemaFile: 'schemas/redshift_tools.json',  // Tool schemas loaded from JSON
+    description: 'Redshift MCP proxy — financial analytics',
+  },
+  // [Claude: add more proxies per SOW data sources]
+];
+
+for (const proxy of mcpProxies) {
+  const runtimeArn = ssmLookup(this, `/{{project_name}}/runtime/${proxy.runtimeSsmKey}`);
+  const toolSchemaData = JSON.parse(fs.readFileSync(proxy.schemaFile, 'utf-8'));
+
+  const proxyFn = new lambda.Function(this, `${proxy.id}ProxyFn`, {
+    functionName: `{{project_name}}-${proxy.targetName}`,
+    runtime: lambda.Runtime.PYTHON_3_13,
+    architecture: lambda.Architecture.ARM_64,
+    handler: 'handler.handler',
+    code: lambda.Code.fromAsset('lambda/mcp_runtime_proxy'),
+    role: proxyRole,
+    timeout: cdk.Duration.seconds(120),
+    memorySize: 512,
+    environment: { RUNTIME_ARN: runtimeArn },
+  });
+
+  proxyFn.grantInvoke(gatewayRole);
+  proxyFn.addPermission(`AllowGatewayInvoke${proxy.id}`, {
+    principal: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+    sourceAccount: cdk.Aws.ACCOUNT_ID,
+  });
+
+  new agentcore.CfnGatewayTarget(this, `${proxy.id}Target`, {
+    name: proxy.targetName,
+    gatewayIdentifier: gateway.attrGatewayIdentifier,
+    credentialProviderConfigurations: [{ credentialProviderType: 'GATEWAY_IAM_ROLE' }],
+    targetConfiguration: {
+      mcp: { lambda: { lambdaArn: proxyFn.functionArn, toolSchema: { inlinePayload: toolSchemaData } } },
+    },
+  });
+}
+```
+
+---
+
+## Lambda Proxy Handler — Pass 3 Reference
 
 ```python
-"""Connect Strands agent to AgentCore Gateway via MCP."""
-from strands.tools.mcp import MCPClient
+"""MCP Runtime Proxy — Lambda bridge: Gateway → AgentCore Runtime (MCP server).
+
+Architecture: Gateway --[IAM]--> Lambda --[IAM]--> AgentCore Runtime (MCP)
+"""
+import json, logging, os, uuid
+import boto3
+
+logger = logging.getLogger()
+RUNTIME_ARN = os.environ['RUNTIME_ARN']
+agentcore_client = boto3.client('bedrock-agentcore')
+
+def handler(event, context):
+    # Extract tool name from Gateway context metadata
+    DELIMITER = '___'
+    tool_name = 'unknown'
+    try:
+        if hasattr(context, 'client_context') and context.client_context:
+            custom = getattr(context.client_context, 'custom', {}) or {}
+            raw = custom.get('bedrockAgentCoreToolName', 'unknown')
+            tool_name = raw[raw.index(DELIMITER) + len(DELIMITER):] if DELIMITER in raw else raw
+    except Exception:
+        pass
+
+    # Build MCP JSON-RPC tools/call request
+    mcp_request = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": event},
+    }
+
+    response = agentcore_client.invoke_agent_runtime(
+        agentRuntimeArn=RUNTIME_ARN,
+        contentType='application/json',
+        payload=json.dumps(mcp_request).encode('utf-8'),
+        qualifier='DEFAULT',
+        runtimeSessionId=str(uuid.uuid4()),
+    )
+
+    raw = response.get('response').read().decode('utf-8')
+    result = json.loads(raw)
+
+    # Parse MCP JSON-RPC response
+    if 'result' in result and 'content' in result.get('result', {}):
+        texts = [c.get('text', '') for c in result['result']['content'] if c.get('type') == 'text']
+        if texts:
+            try: return json.loads(texts[0])
+            except: return {'text': texts[0]}
+    return result
+```
+
+---
+
+## Tool Schema JSON Format
+
+```json
+// schemas/redshift_tools.json
+[
+  {
+    "name": "get_pnl_history",
+    "description": "Get P&L history by business unit and period",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "business_unit": { "type": "string", "description": "Business unit code" },
+        "period": { "type": "string", "description": "Period: MTD, QTD, YTD, T12M" }
+      },
+      "required": ["period"]
+    }
+  }
+]
+```
+
+---
+
+## SigV4 Auth for Agent → Gateway — Pass 3 Reference
+
+```python
+"""SigV4 authentication for agent-to-gateway MCP calls."""
+import boto3, httpx
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 from mcp.client.streamable_http import streamablehttp_client
 
-def get_gateway_mcp_client(gateway_url: str, token: str) -> MCPClient:
-    """Create MCP client connected to AgentCore Gateway (OAuth2)."""
-    return MCPClient(
-        lambda: streamablehttp_client(
-            url=gateway_url,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-    )
+class HTTPXSigV4Auth(httpx.Auth):
+    def __init__(self, session, service, region):
+        self.credentials = session.get_credentials().get_frozen_credentials()
+        self.service = service
+        self.region = region
 
-# Usage with agent:
-# with get_gateway_mcp_client(url, token) as mcp:
-#     agent = Agent(model=model, tools=[mcp])
-```
+    def auth_flow(self, request):
+        aws_request = AWSRequest(method=request.method, url=str(request.url),
+                                  data=request.content if hasattr(request, 'content') else b'')
+        aws_request.headers['Host'] = request.url.host
+        aws_request.headers['Content-Type'] = 'application/json'
+        SigV4Auth(self.credentials, self.service, self.region).add_auth(aws_request)
+        for name, value in aws_request.headers.items():
+            request.headers[name] = value
+        yield request
 
-### AWS IAM Auth (alternative to OAuth2)
-
-```python
-"""Connect via IAM SigV4 using mcp-proxy-for-aws."""
-# pip install mcp-proxy-for-aws
-from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
-from strands.tools.mcp import MCPClient
-
-mcp_client = MCPClient(lambda: aws_iam_streamablehttp_client(
-    endpoint="https://your-service.us-east-1.amazonaws.com/mcp",
-    aws_region="us-east-1",
-    aws_service="bedrock-agentcore",
-))
+def create_gateway_transport(gateway_url: str):
+    session = boto3.Session()
+    auth = HTTPXSigV4Auth(session, 'bedrock-agentcore', os.environ.get('AWS_DEFAULT_REGION', 'us-east-1'))
+    return streamablehttp_client(url=gateway_url, auth=auth)
 ```
