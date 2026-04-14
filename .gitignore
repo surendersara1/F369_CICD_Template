@@ -17,3 +17,6 @@ venv/
 # CDK
 cdk.out/
 .cdk.staging/
+
+# Reference codebases (not part of this repo)
+NBS_PAF_Finance_V2/
