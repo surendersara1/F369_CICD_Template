@@ -24,21 +24,65 @@ ECS is only used for non-agent workloads (PDF generation, ETL, etc.)
 
 ```dockerfile
 # agents/observer/Dockerfile
-FROM python:3.13-slim
-WORKDIR /app
+# Build context is agents/ (parent directory) — set in CDK AgentRuntimeArtifact.fromAsset()
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.13-slim
+WORKDIR /var/task
 
-# Copy shared utilities first (cached layer)
+# Install dependencies first (cached layer)
+COPY observer/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy shared utilities (used by all agents)
 COPY shared/ ./shared/
 COPY evaluations/ ./evaluations/
 
 # Copy agent-specific code
-COPY observer/ ./observer/
-COPY observer/requirements.txt .
+COPY observer/agent.py .
 
+EXPOSE 8080
+ENTRYPOINT ["python", "agent.py"]
+```
+
+---
+
+## MCP-Enabled Agent Dockerfile (agent that connects to Gateway)
+
+```dockerfile
+# agents/observer/Dockerfile — MCP-enabled (connects to Gateway via SigV4)
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.13-slim
+WORKDIR /var/task
+
+COPY observer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-ENV PYTHONUNBUFFERED=1
-CMD ["python", "-m", "observer.agent"]
+COPY shared/ ./shared/
+COPY evaluations/ ./evaluations/
+COPY observer/agent.py .
+
+EXPOSE 8080
+ENTRYPOINT ["python", "agent.py"]
+```
+
+---
+
+## MCP Server Dockerfile (tool server, not agent)
+
+```dockerfile
+# infra/containers/redshift-mcp/Dockerfile — MCP server on AgentCore Runtime
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.13-slim
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "mcp[cli]>=1.8.0" \
+    "psycopg2-binary==2.9.9" \
+    "boto3>=1.35.0"
+
+COPY server.py .
+
+ENV MCP_HOST=0.0.0.0
+ENV MCP_PORT=8000
+EXPOSE 8000
+CMD ["python", "server.py"]
 ```
 
 ---
@@ -91,13 +135,23 @@ new AgentRuntime(this, 'Observer', {
 
 ---
 
-## requirements.txt (per agent)
+## requirements.txt (per agent — MCP-enabled)
 
 ```
-strands-agents>=0.1.0
+strands-agents==1.34.0
 strands-agents-tools>=0.1.0
-bedrock-agentcore>=0.1.0
+bedrock-agentcore==1.6.0
+boto3>=1.34.0
+mcp[cli]>=1.8.0
+httpx>=0.27.0
+```
+
+## requirements.txt (MCP server — tool server only)
+
+```
+mcp[cli]>=1.8.0
 boto3>=1.35.0
+# Add data source driver: psycopg2-binary, opensearch-py, etc.
 ```
 
 ---
