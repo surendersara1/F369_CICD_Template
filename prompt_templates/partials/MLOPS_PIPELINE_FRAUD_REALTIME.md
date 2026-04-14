@@ -88,7 +88,7 @@ def _create_fraud_detection_pipeline(self, stage_name: str) -> None:
     fraud_scoring_fn = _lambda.Function(
         self, "FraudScoringFn",
         function_name=f"{{project_name}}-fraud-score-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_asset("src/fraud_scoring"),
@@ -158,7 +158,7 @@ def _create_fraud_detection_pipeline(self, stage_name: str) -> None:
     feature_eng_fn = _lambda.Function(
         self, "FraudFeatureEngFn",
         function_name=f"{{project_name}}-fraud-feature-eng-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

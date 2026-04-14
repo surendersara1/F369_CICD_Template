@@ -212,7 +212,7 @@ def _create_msk_kafka_cluster(self, stage_name: str) -> None:
     kafka_admin_fn = _lambda.Function(
         self, "KafkaAdminFn",
         function_name=f"{{project_name}}-kafka-admin-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

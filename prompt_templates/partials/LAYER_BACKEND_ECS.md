@@ -232,7 +232,7 @@ def _create_ecs_workers(self, stage_name: str) -> None:
     ecs_trigger_fn = _lambda.Function(
         self, "EcsTaskTrigger",
         function_name=f"{{project_name}}-ecs-trigger-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         handler="index.handler",
         code=_lambda.Code.from_inline("""
 import boto3, os, json

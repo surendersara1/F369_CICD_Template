@@ -205,7 +205,7 @@ def _create_global_multi_region(self, stage_name: str, primary_region: str = "us
     health_fn = _lambda.Function(
         self, "RegionHealthFn",
         function_name=f"{{project_name}}-health-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

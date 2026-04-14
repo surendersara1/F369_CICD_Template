@@ -64,7 +64,7 @@ def _create_recommendations_pipeline(self, stage_name: str) -> None:
     recs_fn = _lambda.Function(
         self, "RecommendationsFn",
         function_name=f"{{project_name}}-recommendations-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""
@@ -148,7 +148,7 @@ def handler(event, context):
     precompute_fn = _lambda.Function(
         self, "RecsPrecomputeFn",
         function_name=f"{{project_name}}-recs-precompute-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

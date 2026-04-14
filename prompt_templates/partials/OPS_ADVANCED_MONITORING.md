@@ -345,7 +345,7 @@ def _create_dlq_redrive(self, stage_name: str) -> None:
     redrive_fn = _lambda.Function(
         self, "DLQRedriveFn",
         function_name=f"{{project_name}}-dlq-redrive-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         handler="index.handler",
         architecture=_lambda.Architecture.ARM_64,
         code=_lambda.Code.from_inline("""

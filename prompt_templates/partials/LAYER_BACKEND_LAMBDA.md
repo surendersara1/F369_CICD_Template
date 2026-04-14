@@ -48,7 +48,7 @@ def _create_backend(self, stage_name: str) -> None:
         self, "CommonLayer",
         layer_version_name=f"{{project_name}}-common-{stage_name}",
         code=_lambda.Code.from_asset("layers/common"),
-        compatible_runtimes=[_lambda.Runtime.PYTHON_3_12],
+        compatible_runtimes=[_lambda.Runtime.PYTHON_3_13],
         description="Common dependencies: aws-lambda-powertools, boto3",
         removal_policy=RemovalPolicy.DESTROY,
     )
@@ -167,8 +167,8 @@ def _create_backend(self, stage_name: str) -> None:
             self, f"{svc['id']}Fn",
             function_name=f"{{project_name}}-{svc['name']}-{stage_name}",
 
-            # Runtime
-            runtime=_lambda.Runtime.PYTHON_3_12,
+            # Runtime (Python 3.13 recommended, 3.14 also available)
+            runtime=_lambda.Runtime.PYTHON_3_13,
             handler=svc["handler"],
             code=_lambda.Code.from_asset(svc["code_path"]),
 

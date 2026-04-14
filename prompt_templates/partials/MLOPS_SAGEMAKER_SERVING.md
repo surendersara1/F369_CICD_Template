@@ -281,7 +281,7 @@ def _create_sagemaker_serving(self, stage_name: str) -> None:
     model_deployer_fn = _lambda.Function(
         self, "ModelDeployer",
         function_name=f"{{project_name}}-model-deployer-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

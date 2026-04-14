@@ -76,9 +76,22 @@ def _create_networking(self, stage_name: str) -> None:
                     iam_role=iam.Role(
                         self, "VPCFlowLogsRole",
                         assumed_by=iam.ServicePrincipal("vpc-flow-logs.amazonaws.com"),
-                        managed_policies=[
-                            iam.ManagedPolicy.from_aws_managed_policy_name("CloudWatchLogsFullAccess")
-                        ],
+                        inline_policies={
+                            "FlowLogs": iam.PolicyDocument(
+                                statements=[
+                                    iam.PolicyStatement(
+                                        actions=[
+                                            "logs:CreateLogGroup",
+                                            "logs:CreateLogStream",
+                                            "logs:PutLogEvents",
+                                            "logs:DescribeLogGroups",
+                                            "logs:DescribeLogStreams",
+                                        ],
+                                        resources=["*"],
+                                    ),
+                                ]
+                            ),
+                        },
                     ),
                 ),
                 traffic_type=ec2.FlowLogTrafficType.ALL,
@@ -189,7 +202,7 @@ def _create_networking(self, stage_name: str) -> None:
     self.redis_sg = ec2.SecurityGroup(
         self, "RedisSG",
         vpc=self.vpc,
-        description="Security group for ElastiCache Redis",
+        description="Security group for ElastiCache",
         allow_all_outbound=False,
         security_group_name=f"{{project_name}}-redis-sg-{stage_name}",
     )

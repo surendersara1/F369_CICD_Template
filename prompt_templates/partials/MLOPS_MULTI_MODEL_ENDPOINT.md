@@ -89,7 +89,7 @@ def _create_multi_model_endpoint(self, stage_name: str) -> None:
     mme_router_fn = _lambda.Function(
         self, "MMERouter",
         function_name=f"{{project_name}}-mme-router-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""
@@ -155,7 +155,7 @@ def handler(event, context):
     model_upload_fn = _lambda.Function(
         self, "MMEModelUpload",
         function_name=f"{{project_name}}-mme-model-upload-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

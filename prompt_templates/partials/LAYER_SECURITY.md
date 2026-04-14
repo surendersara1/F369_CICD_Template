@@ -35,9 +35,8 @@ def _create_security(self, stage_name: str) -> None:
         alias=f"alias/{{project_name}}-master-{stage_name}",
         description=f"{{project_name}} master encryption key ({stage_name}) — encrypts all data at rest",
 
-        # Key rotation (HIPAA: recommended annually, adjust for compliance requirements)
+        # Key rotation (automatic annual rotation when enabled)
         enable_key_rotation=True,
-        rotation_period=Duration.days(90) if stage_name == "prod" else Duration.days(365),
 
         # Key policy: allow account root + specific service principals
         # [Claude: CDK automatically creates key policy — customize if needed]
@@ -65,17 +64,18 @@ def _create_security(self, stage_name: str) -> None:
     # Additional secrets defined here:
 
     # [Claude: Add one Secret per external API credential from Architecture Map L1]
-    # Example: Epic EHR API credentials
-    self.epic_api_secret = sm.Secret(
-        self, "EpicApiSecret",
-        secret_name=f"/{{project_name}}/{stage_name}/integrations/epic",
-        description="Epic EHR API credentials (client_id, client_secret, base_url)",
-        secret_string_value=SecretValue.unsafe_plain_text(
-            # Placeholder — replace with actual secret value via Console or CLI
-            '{"client_id": "REPLACE_ME", "client_secret": "REPLACE_ME", "base_url": "REPLACE_ME"}'
+    # Example: External API credentials (placeholder — populate via Console or CLI)
+    self.external_api_secret = sm.Secret(
+        self, "ExternalApiSecret",
+        secret_name=f"/{{project_name}}/{stage_name}/integrations/external-api",
+        description="External API credentials (client_id, client_secret, base_url)",
+        generate_secret_string=sm.SecretStringGenerator(
+            secret_string_template='{"client_id": "REPLACE_ME", "base_url": "REPLACE_ME"}',
+            generate_string_key="client_secret",
+            exclude_characters="\"@/\\ '",
+            password_length=32,
         ),
         encryption_key=self.kms_key,
-        # Note: rotation for API keys is custom — create rotation Lambda if needed
         removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
     )
 
@@ -220,10 +220,10 @@ def _create_security(self, stage_name: str) -> None:
         export_name=f"{{project_name}}-kms-key-{stage_name}",
     )
 
-    CfnOutput(self, "EpicApiSecretArn",
-        value=self.epic_api_secret.secret_arn,
-        description="Epic API credentials secret ARN",
-        export_name=f"{{project_name}}-epic-secret-{stage_name}",
+    CfnOutput(self, "ExternalApiSecretArn",
+        value=self.external_api_secret.secret_arn,
+        description="External API credentials secret ARN",
+        export_name=f"{{project_name}}-external-api-secret-{stage_name}",
     )
 
     CfnOutput(self, "CloudTrailBucketName",

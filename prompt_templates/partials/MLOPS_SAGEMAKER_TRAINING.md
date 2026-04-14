@@ -318,7 +318,7 @@ def _create_sagemaker_training(self, stage_name: str) -> None:
     pipeline_trigger_fn = _lambda.Function(
         self, "MLPipelineTrigger",
         function_name=f"{{project_name}}-ml-pipeline-trigger-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

@@ -22,13 +22,13 @@ def _create_frontend(self, stage_name: str) -> None:
     Layer 5: Frontend Infrastructure
 
     Architecture:
-      S3 (private bucket) → CloudFront (OAI) → Users
+      S3 (private bucket) → CloudFront (OAC) → Users
       WAF attached to CloudFront distribution
       ACM certificate for custom domain (via Route53)
 
     Security:
       - S3 bucket is PRIVATE (no public access)
-      - CloudFront uses Origin Access Identity (OAI) to access S3
+      - CloudFront uses Origin Access Control (OAC) to access S3 (replaces deprecated OAI)
       - WAF blocks common OWASP Top 10 attacks
       - HTTPS-only with TLS 1.2 minimum
       - Security headers via CloudFront Function
@@ -50,9 +50,8 @@ def _create_frontend(self, stage_name: str) -> None:
         # Security: block ALL public access
         block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
 
-        # Encryption at rest using KMS
-        encryption=s3.BucketEncryption.KMS,
-        encryption_key=self.kms_key,
+        # Encryption at rest (S3-managed for CloudFront OAC compatibility)
+        encryption=s3.BucketEncryption.S3_MANAGED,
 
         # Versioning for rollback capability
         versioned=True,
@@ -199,11 +198,11 @@ function handler(event) {
     self.distribution = cf.Distribution(
         self, "Distribution",
 
-        # OAI: CloudFront can access private S3 bucket
+        # OAC: CloudFront accesses private S3 bucket via Origin Access Control
+        # (OAC replaces deprecated OAI — better security, supports SSE-KMS)
         default_behavior=cf.BehaviorOptions(
-            origin=cf_origins.S3Origin(
+            origin=cf_origins.S3BucketOrigin.with_origin_access_control(
                 self.frontend_bucket,
-                origin_access_identity=cf.OriginAccessIdentity(self, "OAI"),
             ),
             viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
             cache_policy=cf.CachePolicy.CACHING_OPTIMIZED,
@@ -263,10 +262,7 @@ function handler(event) {
         http_version=cf.HttpVersion.HTTP2_AND_3,
     )
 
-    # Grant CloudFront access to S3
-    self.frontend_bucket.grant_read(
-        iam.ServicePrincipal("cloudfront.amazonaws.com")
-    )
+    # Grant CloudFront OAC access to S3 (auto-configured by S3BucketOrigin.with_origin_access_control)
 
     # =========================================================================
     # OUTPUTS

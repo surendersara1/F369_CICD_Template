@@ -91,7 +91,7 @@ def _create_computer_vision_pipeline(self, stage_name: str) -> None:
     cv_submit_fn = _lambda.Function(
         self, "CVInferenceFn",
         function_name=f"{{project_name}}-cv-inference-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

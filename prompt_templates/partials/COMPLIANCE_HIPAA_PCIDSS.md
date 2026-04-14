@@ -222,7 +222,7 @@ def _create_compliance_controls(self, stage_name: str, compliance_standard: str 
 
     inspector_enable_fn = _lambda.Function(
         self, "InspectorEnableFn",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         handler="index.handler",
         code=_lambda.Code.from_inline("""
 import boto3, json, cfnresponse, logging
@@ -256,7 +256,7 @@ def handler(event, context):
     evidence_fn = _lambda.Function(
         self, "ComplianceEvidenceFn",
         function_name=f"{{project_name}}-compliance-evidence-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

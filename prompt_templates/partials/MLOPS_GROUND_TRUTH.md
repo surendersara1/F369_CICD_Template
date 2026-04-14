@@ -108,7 +108,7 @@ def _create_ground_truth_labeling(self, stage_name: str) -> None:
     labeling_trigger_fn = _lambda.Function(
         self, "LabelingJobTrigger",
         function_name=f"{{project_name}}-labeling-trigger-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""
@@ -235,7 +235,7 @@ def handler(event, context):
     labeling_complete_fn = _lambda.Function(
         self, "LabelingCompleteFn",
         function_name=f"{{project_name}}-labeling-complete-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

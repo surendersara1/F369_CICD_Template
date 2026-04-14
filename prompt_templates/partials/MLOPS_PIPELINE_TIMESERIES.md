@@ -59,7 +59,7 @@ def _create_timeseries_pipeline(self, stage_name: str) -> None:
     forecast_fn = _lambda.Function(
         self, "ForecastFn",
         function_name=f"{{project_name}}-forecast-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_asset("src/forecast_service"),
@@ -94,7 +94,7 @@ def _create_timeseries_pipeline(self, stage_name: str) -> None:
     ts_pipeline_fn = _lambda.Function(
         self, "TSPipelineTrigger",
         function_name=f"{{project_name}}-ts-pipeline-trigger-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

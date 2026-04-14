@@ -10,7 +10,7 @@
 | ------------------------------------------- | -------------------- |
 | "SQL", "relational", "transactions", "ACID" | Aurora Serverless V2 |
 | "NoSQL", "key-value", "session", "metadata" | DynamoDB             |
-| "cache", "low latency", "session store"     | ElastiCache Redis    |
+| "cache", "low latency", "session store"     | ElastiCache Valkey Serverless (or Redis OSS) |
 | "search", "full-text", "faceted search"     | OpenSearch Service   |
 | "data lake", "analytics", "Athena", "Glue"  | S3 + Glue + Athena   |
 | "message queue", "async", "decouple"        | SQS                  |
@@ -28,7 +28,7 @@ def _create_data_layer(self, stage_name: str) -> None:
     Components (include based on Architecture Map):
       A) Aurora Serverless V2 (PostgreSQL)  — relational/SQL data
       B) DynamoDB Tables                    — NoSQL/fast lookup data
-      C) ElastiCache Redis                  — caching/sessions
+      C) ElastiCache Valkey/Redis          — caching/sessions
       D) S3 Data Bucket                     — file storage / data lake
       E) SQS Queues                         — async message passing
 
@@ -78,7 +78,7 @@ def _create_data_layer(self, stage_name: str) -> None:
         cluster_identifier=f"{{project_name}}-{stage_name}",
 
         engine=rds.DatabaseClusterEngine.aurora_postgresql(
-            version=rds.AuroraPostgresEngineVersion.VER_16_1,
+            version=rds.AuroraPostgresEngineVersion.VER_16_6,
         ),
 
         # Serverless V2 writer instance
@@ -228,30 +228,42 @@ def _create_data_layer(self, stage_name: str) -> None:
         self.ddb_tables[table_config["id"]] = table
 
     # =========================================================================
-    # C) ELASTICACHE REDIS
+    # C) ELASTICACHE (Valkey Serverless or Redis OSS)
+    # AWS recommends Valkey (Redis-compatible fork) as the default engine.
+    # ElastiCache Serverless auto-scales and requires no node management.
     # Include if caching/sessions detected in Architecture Map L2
     # =========================================================================
 
     self.redis_sg = ec2.SecurityGroup(
         self, "RedisSG",
         vpc=self.vpc,
-        description="Security group for ElastiCache Redis",
+        description="Security group for ElastiCache",
         allow_all_outbound=False,
     )
 
+    # Option A: ElastiCache Serverless (recommended — auto-scales, no node management)
+    # self.cache = elasticache.CfnServerlessCache(
+    #     self, "CacheServerless",
+    #     serverless_cache_name=f"{{project_name}}-cache-{stage_name}",
+    #     engine="valkey",  # or "redis" for Redis OSS compatibility
+    #     security_group_ids=[self.redis_sg.security_group_id],
+    #     subnet_ids=[subnet.subnet_id for subnet in self.vpc.isolated_subnets],
+    # )
+
+    # Option B: ElastiCache Replication Group (node-based, more control)
     redis_subnet_group = elasticache.CfnSubnetGroup(
         self, "RedisSubnetGroup",
-        description="Subnet group for ElastiCache Redis",
+        description="Subnet group for ElastiCache",
         subnet_ids=[subnet.subnet_id for subnet in self.vpc.isolated_subnets],
     )
 
     self.redis_cluster = elasticache.CfnReplicationGroup(
         self, "Redis",
-        replication_group_description=f"{{project_name}} Redis {stage_name}",
+        replication_group_description=f"{{project_name}} cache {stage_name}",
 
-        # Engine
-        engine="redis",
-        engine_version="7.1",
+        # Engine: Valkey (recommended) or Redis OSS
+        engine="valkey",  # [Claude: use "redis" if SOW specifically requires Redis OSS]
+        engine_version="8.0",
         cache_node_type="cache.t4g.micro" if stage_name == "dev" else "cache.r7g.large",
 
         # Cluster configuration

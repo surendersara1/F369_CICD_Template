@@ -40,7 +40,7 @@ def _create_batch_transform_pipeline(self, stage_name: str) -> None:
     batch_trigger_fn = _lambda.Function(
         self, "BatchTransformTrigger",
         function_name=f"{{project_name}}-batch-trigger-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""
@@ -143,7 +143,7 @@ def handler(event, context):
     post_process_fn = _lambda.Function(
         self, "BatchPostProcessFn",
         function_name=f"{{project_name}}-batch-postprocess-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_inline("""

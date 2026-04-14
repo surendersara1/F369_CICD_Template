@@ -20,9 +20,9 @@ AWS Bedrock Stack:
   │  ┌──────────────┐  ┌───────────────┐  ┌───────────────────┐   │
   │  │  Foundation  │  │  Knowledge    │  │    Bedrock        │   │
   │  │  Models      │  │  Bases (RAG)  │  │    Agents         │   │
-  │  │  Claude 3.5  │  │  OpenSearch   │  │  (multi-step AI)  │   │
+  │  │  Claude 4    │  │  OpenSearch   │  │  (multi-step AI)  │   │
   │  │  Titan       │  │  Vector Store │  │                   │   │
-  │  │  Llama 3.1   │  │               │  │                   │   │
+  │  │  Llama 4     │  │               │  │                   │   │
   │  └──────────────┘  └───────────────┘  └───────────────────┘   │
   │  ┌──────────────┐  ┌───────────────┐  ┌───────────────────┐   │
   │  │  Guardrails  │  │  Model Eval   │  │  Prompt Mgmt      │   │
@@ -66,10 +66,10 @@ def _create_llmops(self, stage_name: str) -> None:
     # =========================================================================
 
     BEDROCK_MODELS = {
-        "chat": "anthropic.claude-3-5-sonnet-20241022-v2:0",  # Primary chat model
-        "embedding": "amazon.titan-embed-text-v2:0",          # For RAG vectorization
+        "chat": "anthropic.claude-sonnet-4-20250514-v1:0",     # Primary chat model
+        "embedding": "amazon.titan-embed-text-v2:0",           # For RAG vectorization
         "classification": "anthropic.claude-3-haiku-20240307-v1:0",  # Fast/cheap classification
-        "vision": "anthropic.claude-3-5-sonnet-20241022-v2:0",       # Multimodal (images + text)
+        "vision": "anthropic.claude-sonnet-4-20250514-v1:0",   # Multimodal (images + text)
     }
 
     # =========================================================================
@@ -261,7 +261,7 @@ def _create_llmops(self, stage_name: str) -> None:
     agent_action_fn = _lambda.Function(
         self, "AgentActionsFn",
         function_name=f"{{project_name}}-agent-actions-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_asset("src/agent_actions"),
@@ -447,7 +447,7 @@ Always:
     llm_gateway_fn = _lambda.Function(
         self, "LLMGateway",
         function_name=f"{{project_name}}-llm-gateway-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_12,
+        runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
         code=_lambda.Code.from_asset("src/llm_gateway"),
