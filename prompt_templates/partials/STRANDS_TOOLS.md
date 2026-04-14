@@ -1,150 +1,167 @@
-# PARTIAL: Strands Tools — @tool Decorator, Tool Executors, Community Tools
+# PARTIAL: Strands Tools — @tool, Code Interpreter, Shell Executor, Community Tools
 
-**Usage:** Include when SOW mentions custom agent tools, @tool decorator, tool execution, parallel tools, or community tools package.
+**Usage:** Include when SOW mentions custom agent tools, code execution, shell commands, or community tools.
 
 ---
 
-## Strands Tools Overview
+## Tool Patterns (from real production)
 
 ```
-Tool Types:
-  1. Custom @tool functions (Python decorator with docstring schema)
-  2. Community tools (strands-agents-tools package)
-  3. MCP tools (see STRANDS_MCP_TOOLS.md)
-  4. Agents as tools (see STRANDS_MULTI_AGENT.md)
-  5. File-loaded tools (dynamic loading from .py files)
-
-Tool Execution:
-  - Sequential (default): tools run one at a time
-  - Parallel: concurrent execution when model returns multiple tool_use blocks
+Tool Types in Production:
+  1. @tool functions — custom business logic (KB search, artifact save, etc.)
+  2. Sub-agent tools — wrap invoke_agent_runtime() as @tool
+  3. Code Interpreter — AgentCore invoke_code_interpreter() with S3 chart upload
+  4. Shell Executor — SQL queries and Python scripts with sandboxing
+  5. MCP tools — via Gateway (see STRANDS_MCP_TOOLS.md)
+  6. Community tools — strands-agents-tools package (http_request, calculator, etc.)
 ```
 
 ---
 
-## Custom Tool Pattern — Pass 3 Reference
+## @tool Pattern — Pass 3 Reference
 
 ```python
-"""Custom tools using @tool decorator."""
+"""Custom tools using @tool decorator. Docstrings = schema."""
 from strands import tool
+import boto3, os, json, time
 
 @tool
-def query_database(sql: str, database: str = "default") -> str:
-    """Execute a read-only SQL query against the database.
-
+def search_knowledge_base(query: str, max_results: int = 5) -> str:
+    """Search the knowledge base for relevant information.
     Args:
-        sql: The SQL SELECT query to execute.
-        database: Target database name (default: 'default').
-
+        query: The search query to find relevant documents.
+        max_results: Maximum number of results to return (default 5).
     Returns:
-        Query results as formatted text.
+        Formatted search results with source citations.
     """
-    # [Claude: implement based on SOW data layer]
-    import boto3
-    client = boto3.client("rds-data")
-    response = client.execute_statement(
-        resourceArn=os.environ["DB_CLUSTER_ARN"],
-        secretArn=os.environ["DB_SECRET_ARN"],
-        database=database,
-        sql=sql,
+    client = boto3.client("bedrock-agent-runtime")
+    response = client.retrieve(
+        knowledgeBaseId=os.environ.get("KNOWLEDGE_BASE_ID", ""),
+        retrievalQuery={"text": query},
+        retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": max_results}},
     )
-    return str(response.get("records", []))
-
+    results = []
+    for i, r in enumerate(response.get("retrievalResults", []), 1):
+        text = r["content"]["text"]
+        score = r.get("score", 0)
+        results.append(f"[Source {i}] (score: {score:.2f})\n{text}")
+    return "\n---\n".join(results) if results else "No results found."
 
 @tool
-def send_notification(channel: str, message: str, urgency: str = "normal") -> str:
-    """Send a notification to a specified channel.
-
+def save_artifact(filename: str, content: str) -> str:
+    """Save an artifact to S3 with presigned URL.
     Args:
-        channel: Target channel — 'email', 'slack', or 'sns'.
-        message: The notification message content.
-        urgency: Priority level — 'low', 'normal', or 'high'.
-
+        filename: Name of the file to save.
+        content: Content to write.
     Returns:
-        Confirmation of notification delivery.
+        S3 URI and presigned URL of the saved artifact.
     """
-    # [Claude: implement based on SOW notification requirements]
-    import boto3
-    sns = boto3.client("sns")
-    sns.publish(
-        TopicArn=os.environ["ALERT_TOPIC_ARN"],
-        Subject=f"[{urgency.upper()}] Agent Notification",
-        Message=message,
-    )
-    return f"Notification sent to {channel}"
+    s3 = boto3.client("s3")
+    bucket = os.environ["AGENT_ARTIFACTS_BUCKET"]
+    key = f"artifacts/{time.strftime('%Y/%m/%d')}/{filename}"
+    s3.put_object(Bucket=bucket, Key=key, Body=content.encode("utf-8"))
+    url = s3.generate_presigned_url('get_object',
+        Params={'Bucket': bucket, 'Key': key}, ExpiresIn=3600)
+    return json.dumps({"s3_uri": f"s3://{bucket}/{key}", "presigned_url": url})
 ```
 
 ---
 
-## Tool Executors — Parallel Execution
+## Code Interpreter — Pass 3 Reference
 
 ```python
-"""Parallel tool execution for concurrent tool calls."""
-from strands import Agent
-from strands.tools.executor import ThreadPoolExecutor
+"""Code Interpreter — execute Python in AgentCore sandbox with S3 chart upload."""
+import base64, io, json, logging, os, time, uuid
+import boto3
 
-# Default: sequential execution
-agent = Agent(tools=[tool_a, tool_b, tool_c])
+_agentcore = boto3.client('bedrock-agentcore')
+_s3 = boto3.client('s3')
+CHARTS_BUCKET = os.environ.get('CHARTS_BUCKET', '')
 
-# Parallel: concurrent execution when model returns multiple tool_use blocks
-agent = Agent(
-    tools=[tool_a, tool_b, tool_c],
-    tool_executor=ThreadPoolExecutor(max_workers=5),
-)
+@tool
+def run_financial_analysis(code: str, description: str = "") -> str:
+    """Execute Python code for custom analysis, charts, and simulations.
+    Available: numpy, pandas, matplotlib, scipy, seaborn.
+    Generated charts are uploaded to S3 with presigned URLs.
+    Args:
+        code: Complete Python script to execute.
+        description: What this script does (for audit trail).
+    Returns:
+        Execution result with stdout, stderr, and chart URLs.
+    """
+    try:
+        resp = _agentcore.invoke_code_interpreter(
+            code=code, language='python', timeoutInSeconds=120)
+        files = {}
+        media_urls = []
+        for f in resp.get('outputFiles', []):
+            file_name = f['name']
+            file_bytes = f['content']
+            files[file_name] = base64.b64encode(file_bytes).decode()
+            # Upload to S3 with presigned URL
+            if CHARTS_BUCKET:
+                key = f"charts/{time.strftime('%Y/%m/%d')}/{uuid.uuid4().hex[:8]}_{file_name}"
+                _s3.put_object(Bucket=CHARTS_BUCKET, Key=key, Body=file_bytes)
+                url = _s3.generate_presigned_url('get_object',
+                    Params={'Bucket': CHARTS_BUCKET, 'Key': key}, ExpiresIn=3600)
+                media_urls.append({'name': file_name, 'url': url})
+        return json.dumps({
+            'stdout': resp.get('stdout', ''), 'stderr': resp.get('stderr', ''),
+            'files': files, 'media_urls': media_urls,
+            'success': resp.get('exitCode', 1) == 0,
+        })
+    except Exception as e:
+        return json.dumps({'error': str(e), 'success': False})
 ```
 
 ---
 
-## Community Tools Package
+## Shell Executor — Pass 3 Reference
+
+```python
+"""Shell executor — SQL queries and Python scripts with sandboxing."""
+
+@tool
+def run_sql_query(sql: str, database: str = "default") -> str:
+    """Execute a read-only SQL query against the database.
+    Only SELECT/WITH/EXPLAIN statements are allowed.
+    Args:
+        sql: SQL SELECT query to execute.
+        database: Target database name.
+    Returns:
+        Query results as JSON with columns, rows, and row count.
+    """
+    # Validate: only allow read-only statements
+    sql_upper = sql.strip().upper()
+    if not any(sql_upper.startswith(kw) for kw in ['SELECT', 'WITH', 'EXPLAIN']):
+        return json.dumps({'error': 'Only SELECT/WITH/EXPLAIN statements allowed'})
+    # [Claude: implement using Redshift Data API or Aurora Data API]
+    return json.dumps({'columns': [], 'rows': [], 'row_count': 0})
+```
+
+---
+
+## Community Tools
 
 ```python
 """Built-in tools from strands-agents-tools."""
 # pip install strands-agents-tools
-from strands_tools import (
-    http_request,    # HTTP GET/POST/PUT/DELETE
-    retrieve,        # Document retrieval
-    calculator,      # Math calculations
-    python_repl,     # Python code execution
-    file_read,       # Read files
-    file_write,      # Write files
-    shell,           # Shell command execution
-)
-
+from strands_tools import http_request, calculator, python_repl, retrieve
 from strands import Agent
+
 agent = Agent(tools=[http_request, calculator, python_repl])
 ```
 
 ---
 
-## Loading Tools from Files
-
-```python
-"""Dynamic tool loading from Python files."""
-from strands import Agent
-
-# Load tools from a file path
-agent = Agent(tools=["path/to/my_tools.py"])
-
-# Auto-reload tools when file changes (dev mode)
-agent = Agent(tools=["path/to/my_tools.py"], auto_reload_tools=True)
-```
-
----
-
-## Tool Design Best Practices
+## Tool Design Rules
 
 ```
-1. DOCSTRINGS ARE CRITICAL — Strands generates tool schema from docstrings.
+1. DOCSTRINGS ARE SCHEMA — Strands generates tool schema from docstrings.
    Always include: description, Args (with types), Returns.
-
-2. KEEP TOOLS FOCUSED — One tool = one action. Don't combine unrelated logic.
-
-3. RETURN STRINGS — Tools should return str. The model reads the output.
-
-4. ERROR HANDLING — Catch exceptions and return error messages as strings.
-   Don't let tools raise unhandled exceptions.
-
-5. IDEMPOTENT WHEN POSSIBLE — Tools may be retried by the agent loop.
-
-6. SECURITY — Validate inputs. Don't execute arbitrary code from user input.
-   Scope database queries to read-only when possible.
+2. RETURN STRINGS — Tools must return str. The model reads the output.
+3. ERROR HANDLING — Catch exceptions, return error as string. Never raise.
+4. IDEMPOTENT — Tools may be retried by the agent loop.
+5. SECURITY — Validate inputs. Scope DB queries to read-only.
+6. PRESIGNED URLS — For file outputs, upload to S3 and return presigned URL.
 ```

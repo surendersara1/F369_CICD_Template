@@ -1,127 +1,146 @@
-# PARTIAL: Strands Deploy to Lambda — Serverless Agent Hosting
+# PARTIAL: Strands Deploy to Lambda — Proxy Lambda, Direct Lambda, Lambda Layer
 
-**Usage:** Include when SOW mentions Lambda-hosted agents, serverless agent deployment, or lightweight agent tasks (<15 min).
+**Usage:** Include when SOW mentions Lambda-hosted agents, MCP proxy Lambda, or serverless agent deployment.
 
 ---
 
-## Lambda Deployment Overview
+## Lambda Deployment Patterns (from real production)
 
 ```
-Lambda Agent = Serverless agent execution for request/response workloads:
-  - Max 15 min timeout (suitable for most agent tasks)
-  - Official Strands Lambda Layer available (quick setup)
-  - Custom layer for additional dependencies (strands-agents-tools)
-  - ARM64 recommended for cost optimization
-  - MCP tools require context manager lifecycle on Lambda
-  - No streaming (use Fargate for streaming responses)
+Three Lambda patterns:
+  1. MCP Runtime Proxy: Gateway → Lambda → invoke_agent_runtime() → MCP Server
+  2. Direct Lambda Target: Gateway → Lambda (tool logic runs in Lambda)
+  3. Agent Lambda: API GW → Lambda → Strands Agent (for simple agents)
 
-Lambda Layer ARN:
+Production uses Pattern 1+2 via Gateway. Pattern 3 for standalone agents.
+
+Lambda Layer ARN (official Strands):
   arn:aws:lambda:{region}:856699698935:layer:strands-agents-py{version}-{arch}:{layer_version}
-  Example: arn:aws:lambda:us-east-1:856699698935:layer:strands-agents-py3_12-x86_64:1
-
-  Python: 3.10, 3.11, 3.12, 3.13
-  Arch: x86_64, aarch64
-  Layer v1 = SDK v1.23.0
+  Python: 3.10-3.13  |  Arch: x86_64, aarch64  |  Layer v1 = SDK v1.23.0
 ```
 
 ---
 
-## CDK Code Block — Lambda Agent Host
+## Pattern 1: MCP Runtime Proxy Lambda — Pass 2A Reference
+
+```typescript
+// CDK: Lambda proxy that bridges Gateway → AgentCore Runtime (MCP server)
+const proxyRole = new iam.Role(this, 'McpProxyRole', {
+  assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+  managedPolicies: [
+    iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+  ],
+});
+proxyRole.addToPolicy(new iam.PolicyStatement({
+  actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+  resources: [/* MCP Runtime ARNs from SSM */],
+}));
+
+const proxyFn = new lambda.Function(this, 'McpProxyFn', {
+  functionName: `{{project_name}}-mcp-proxy`,
+  runtime: lambda.Runtime.PYTHON_3_13,
+  architecture: lambda.Architecture.ARM_64,
+  handler: 'handler.handler',
+  code: lambda.Code.fromAsset('lambda/mcp_runtime_proxy'),
+  role: proxyRole,
+  timeout: cdk.Duration.seconds(120),
+  memorySize: 512,
+  environment: { RUNTIME_ARN: runtimeArn },
+});
+```
+
+---
+
+## MCP Proxy Handler — Pass 3 Reference
 
 ```python
-def _create_strands_agent_lambda(self, stage_name: str) -> None:
-    """
-    Strands agent Lambda function.
+"""MCP Runtime Proxy — Gateway → Lambda → AgentCore Runtime (MCP server)."""
+import json, logging, os, uuid
+import boto3
 
-    Components:
-      A) IAM Role for Bedrock model access
-      B) Lambda function with agent code
-      C) Environment variables for agent configuration
+RUNTIME_ARN = os.environ['RUNTIME_ARN']
+agentcore_client = boto3.client('bedrock-agentcore')
 
-    [Claude: include for any SOW with Strands agents.
-     Use Lambda for <15min tasks. Use ECS Fargate for long-running/streaming.]
-    """
+def handler(event, context):
+    # Extract tool name from Gateway context metadata
+    tool_name = 'unknown'
+    try:
+        if hasattr(context, 'client_context') and context.client_context:
+            raw = getattr(context.client_context, 'custom', {}).get('bedrockAgentCoreToolName', '')
+            tool_name = raw.split('___')[-1] if '___' in raw else raw
+    except Exception: pass
 
-    # =========================================================================
-    # A) IAM ROLE
-    # =========================================================================
+    # Build MCP JSON-RPC request
+    mcp_request = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": event},
+    }
 
-    self.strands_agent_role = iam.Role(
-        self, "StrandsAgentRole",
-        assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-        role_name=f"{{project_name}}-strands-agent-{stage_name}",
-        managed_policies=[
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole"),
-        ],
-    )
-    self.strands_agent_role.add_to_policy(iam.PolicyStatement(
-        sid="BedrockModelInvoke",
-        actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[
-            f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.*",
-            f"arn:aws:bedrock:{self.region}::foundation-model/amazon.*",
-        ],
-    ))
-
-    # [Claude: add KB Retrieve, Guardrails, etc. based on SOW]
-
-    # =========================================================================
-    # B) LAMBDA FUNCTION
-    # =========================================================================
-
-    self.strands_agent_lambda = _lambda.Function(
-        self, "StrandsAgentFn",
-        function_name=f"{{project_name}}-strands-agent-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_13,
-        architecture=_lambda.Architecture.ARM_64,
-        handler="index.handler",
-        code=_lambda.Code.from_asset("src/strands_agent"),
-        environment={
-            "STAGE": stage_name,
-            "DEFAULT_MODEL_ID": "anthropic.claude-sonnet-4-20250514-v1:0",
-            "SESSION_TABLE": self.agent_session_table.table_name,
-            "AGENT_ARTIFACTS_BUCKET": self.agent_artifacts_bucket.bucket_name,
-            "MAX_TURNS": "30",
-            # [Claude: add KNOWLEDGE_BASE_ID, GUARDRAIL_ID if enabled]
-        },
-        timeout=Duration.minutes(15),
-        memory_size=512 if stage_name == "dev" else 1024,
-        tracing=_lambda.Tracing.ACTIVE,
-        vpc=self.vpc,
-        vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-        security_groups=[self.lambda_sg],
-        role=self.strands_agent_role,
+    response = agentcore_client.invoke_agent_runtime(
+        agentRuntimeArn=RUNTIME_ARN,
+        contentType='application/json',
+        payload=json.dumps(mcp_request).encode('utf-8'),
+        qualifier='DEFAULT',
+        runtimeSessionId=str(uuid.uuid4()),
     )
 
-    self.agent_session_table.grant_read_write_data(self.strands_agent_role)
-    self.agent_artifacts_bucket.grant_read_write(self.strands_agent_role)
-
-    CfnOutput(self, "StrandsAgentLambdaArn",
-        value=self.strands_agent_lambda.function_arn,
-        description="Strands Agent Lambda ARN",
-    )
+    raw = response.get('response').read().decode('utf-8')
+    result = json.loads(raw)
+    if 'result' in result and 'content' in result.get('result', {}):
+        texts = [c.get('text', '') for c in result['result']['content'] if c.get('type') == 'text']
+        if texts:
+            try: return json.loads(texts[0])
+            except: return {'text': texts[0]}
+    return result
 ```
 
 ---
 
-## Packaging for Lambda
+## Pattern 2: Direct Lambda Target — Pass 2A Reference
 
-```bash
-# Install dependencies for ARM64 Lambda
-pip install -r requirements.txt \
-    --python-version 3.12 \
-    --platform manylinux2014_aarch64 \
-    --target ./packaging/_dependencies \
-    --only-binary=:all:
+```typescript
+// CDK: Lambda with tool logic, exposed directly via Gateway
+const toolFn = new lambda.Function(this, 'ToolFn', {
+  functionName: `{{project_name}}-tool-name`,
+  runtime: lambda.Runtime.PYTHON_3_13,
+  architecture: lambda.Architecture.ARM_64,
+  handler: 'index.handler',
+  code: lambda.Code.fromAsset('lambda/tool_name'),
+  timeout: cdk.Duration.seconds(60),
+  memorySize: 512,
+  vpc, vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+});
+
+// Both identity-based AND resource-based permissions required
+toolFn.grantInvoke(gatewayRole);
+toolFn.addPermission('AllowAgentCoreInvoke', {
+  principal: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+  sourceAccount: cdk.Aws.ACCOUNT_ID,
+});
 ```
 
 ---
 
-## requirements.txt
+## Pattern 3: Standalone Agent Lambda — Pass 2A Reference
 
-```
-strands-agents>=0.1.0
-strands-agents-tools>=0.1.0
-boto3>=1.35.0
+```python
+"""Simple agent Lambda — for standalone agents not on AgentCore Runtime."""
+from strands import Agent
+from strands.models import BedrockModel
+import json
+
+def handler(event, context):
+    body = json.loads(event.get("body", "{}")) if isinstance(event.get("body"), str) else event
+    agent = Agent(
+        model=BedrockModel(model_id="anthropic.claude-sonnet-4-20250514-v1:0"),
+        system_prompt="You are helpful.",
+        tools=[],  # [Claude: add tools from SOW]
+    )
+    response = agent(body.get("message", ""))
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"response": str(response)}),
+    }
 ```

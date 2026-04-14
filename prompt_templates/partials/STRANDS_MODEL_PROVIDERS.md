@@ -1,10 +1,72 @@
-# PARTIAL: Strands Model Providers — Multi-LLM Support
+# PARTIAL: Strands Model Providers — Model Fallback, Guardrail Integration, Multi-Provider
 
-**Usage:** Include when SOW mentions multiple LLM providers, model switching, Bedrock, Anthropic, OpenAI, Google Gemini, or any non-default model provider.
+**Usage:** Include when SOW mentions model selection, cost optimization, Haiku/Sonnet routing, guardrails, or multiple LLM providers.
 
 ---
 
-## Supported Model Providers
+## Model Selection Pattern (from real production)
+
+```
+Production uses intelligent model routing:
+  Simple queries (KPI lookups, data retrieval) → Haiku (10x cheaper)
+  Complex queries (RCA, forecasting, simulations) → Sonnet (higher quality)
+  Approval queries (POs, compliance, authorization) → Sonnet (full chain)
+
+Classification is keyword-based (no LLM call needed):
+  SIMPLE: "what is", "show me", "current", "latest", "how much", "list", "get"
+  COMPLEX: "why", "root cause", "analyze", "compare", "recommend", "forecast"
+  APPROVAL: "approve", "authorize", "purchase order", "payment", "compliance"
+```
+
+---
+
+## Model Fallback with Complexity Classification — Pass 3 Reference
+
+```python
+"""Model selection: simple→Haiku (10x cheaper), complex→Sonnet."""
+import re
+from strands.models import BedrockModel
+
+SIMPLE = re.compile(r'\b(what is|show me|current|latest|how much|list|get|total|display)\b', re.I)
+COMPLEX = re.compile(r'\b(why|root cause|analyze|compare|recommend|forecast|simulate|variance|decompose|trend|impact|risk|scenario)\b', re.I)
+APPROVAL = re.compile(r'\b(approve|authorize|purchase order|PO\b|payment|sign off|budget approval|compliance check|vendor onboard)\b', re.I)
+
+def classify_query_complexity(query: str) -> str:
+    if len(APPROVAL.findall(query)) >= 1: return 'approval'
+    complex_n = len(COMPLEX.findall(query))
+    simple_n = len(SIMPLE.findall(query))
+    if complex_n >= 2: return 'complex'
+    if simple_n >= 1 and complex_n == 0: return 'simple'
+    return 'complex' if len(query) > 100 else 'simple'
+
+def build_model_with_fallback(query, primary_id, fallback_id, guardrail_id='', guardrail_version='DRAFT'):
+    complexity = classify_query_complexity(query)
+    model_id = fallback_id if complexity == 'simple' else primary_id
+    model = build_bedrock_model(model_id, guardrail_id, guardrail_version)
+    return model, model_id, complexity
+```
+
+---
+
+## Guardrail Integration — Pass 3 Reference
+
+```python
+"""Attach Bedrock Guardrail to Strands BedrockModel."""
+def build_bedrock_model(model_id: str, guardrail_id: str = '', guardrail_version: str = 'DRAFT'):
+    if guardrail_id:
+        return BedrockModel(model_id=model_id, additional_request_fields={
+            'guardrailConfig': {
+                'guardrailIdentifier': guardrail_id,
+                'guardrailVersion': guardrail_version,
+                'trace': 'enabled',  # Enable guardrail trace for audit
+            }
+        })
+    return BedrockModel(model_id=model_id)
+```
+
+---
+
+## Supported Providers
 
 | Provider | Python | TypeScript | Import |
 |----------|--------|------------|--------|
@@ -13,88 +75,25 @@
 | Anthropic (direct) | ✅ | ❌ | `from strands.models.anthropic import AnthropicModel` |
 | OpenAI | ✅ | ✅ | `from strands.models.openai import OpenAIModel` |
 | Google Gemini | ✅ | ✅ | `from strands.models.google import GoogleModel` |
-| LiteLLM | ✅ | ❌ | `from strands.models.litellm import LiteLLMModel` |
-| llama.cpp | ✅ | ❌ | `from strands.models.llamacpp import LlamaCppModel` |
-| LlamaAPI | ✅ | ❌ | `from strands.models.llamaapi import LlamaAPIModel` |
-| MistralAI | ✅ | ❌ | `from strands.models.mistral import MistralModel` |
-| Ollama | ✅ | ❌ | `from strands.models.ollama import OllamaModel` |
+| Ollama (local) | ✅ | ❌ | `from strands.models.ollama import OllamaModel` |
 | SageMaker | ✅ | ❌ | `from strands.models.sagemaker import SageMakerModel` |
-| Writer | ✅ | ❌ | `from strands.models.writer import WriterModel` |
 | Custom | ✅ | ✅ | Implement `Model` interface |
 
 ---
 
-## CDK Code Block — Secrets for Third-Party API Keys
+## Multi-Provider Example
 
 ```python
-def _create_llm_provider_secrets(self, stage_name: str) -> None:
-    """
-    Secrets Manager for third-party LLM API keys.
-
-    [Claude: only create secrets for providers mentioned in SOW.
-     Bedrock does not need a secret — it uses IAM roles.]
-    """
-
-    self.llm_api_keys = {}
-    # [Claude: include only providers from SOW]
-    for provider in ["anthropic", "openai"]:
-        self.llm_api_keys[provider] = sm.Secret(
-            self, f"LLMApiKey-{provider.title()}",
-            secret_name=f"{{project_name}}/{stage_name}/llm-api-key/{provider}",
-            description=f"{provider.title()} API key for Strands agent",
-            encryption_key=self.kms_key,
-        )
-        self.llm_api_keys[provider].grant_read(self.agentcore_runtime_role)
-```
-
----
-
-## Model Initialization Patterns — Pass 3 Reference
-
-```python
-"""Model provider initialization patterns."""
 from strands import Agent
-
-# --- Amazon Bedrock (default, uses IAM role) ---
 from strands.models.bedrock import BedrockModel
-bedrock_model = BedrockModel(
-    model_id="anthropic.claude-sonnet-4-20250514-v1:0",
-    region_name="us-east-1",
-)
-
-# --- Anthropic Direct API ---
-from strands.models.anthropic import AnthropicModel
-anthropic_model = AnthropicModel(
-    client_args={"api_key": os.environ["ANTHROPIC_API_KEY"]},
-    model_id="claude-sonnet-4-20250514",
-)
-
-# --- OpenAI ---
 from strands.models.openai import OpenAIModel
-openai_model = OpenAIModel(
-    client_args={"api_key": os.environ["OPENAI_API_KEY"]},
-    model_id="gpt-4o",
-)
 
-# --- Google Gemini ---
-from strands.models.google import GoogleModel
-google_model = GoogleModel(
-    model_id="gemini-2.0-flash",
-    client_args={"api_key": os.environ["GOOGLE_API_KEY"]},
-)
+# Bedrock (default — uses IAM role, no API key)
+bedrock = BedrockModel(model_id="anthropic.claude-sonnet-4-20250514-v1:0")
 
-# --- Ollama (local) ---
-from strands.models.ollama import OllamaModel
-ollama_model = OllamaModel(model_id="llama3.1:8b")
+# OpenAI (needs API key in env or Secrets Manager)
+openai = OpenAIModel(client_args={"api_key": os.environ["OPENAI_API_KEY"]}, model_id="gpt-4o")
 
-# --- SageMaker Endpoint ---
-from strands.models.sagemaker import SageMakerModel
-sagemaker_model = SageMakerModel(
-    endpoint_name="my-llm-endpoint",
-    region_name="us-east-1",
-)
-
-# Models are interchangeable — just swap the model instance:
-agent = Agent(model=bedrock_model, system_prompt="...", tools=[...])
-# Switch to OpenAI: agent = Agent(model=openai_model, ...)
+# Models are interchangeable — just swap
+agent = Agent(model=bedrock, system_prompt="...", tools=[...])
 ```

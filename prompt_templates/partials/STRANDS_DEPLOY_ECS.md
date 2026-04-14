@@ -1,161 +1,114 @@
-# PARTIAL: Strands Deploy to ECS Fargate — Long-Running & Streaming Agents
+# PARTIAL: Strands Deploy to AgentCore Runtime — Containerized Agents
 
-**Usage:** Include when SOW mentions long-running agents, streaming responses, multi-turn sessions >15min, ECS Fargate agent hosting, or containerized agents.
-
----
-
-## ECS Fargate Deployment Overview
-
-```
-ECS Fargate Agent = Containerized agent for long-running/streaming workloads:
-  - No timeout limit (unlike Lambda's 15 min)
-  - Response streaming via HTTP/WebSocket
-  - Multi-turn sessions with persistent connections
-  - Auto-scaling based on CPU/memory or request count
-  - Health check endpoint for ALB integration
-```
+**Usage:** Include when SOW mentions AgentCore Runtime deployment, containerized agents, long-running agents, or per-agent Docker containers.
 
 ---
 
-## CDK Code Block — ECS Fargate Agent Host
+## Deployment Pattern (from real production)
 
-```python
-def _create_strands_agent_ecs(self, stage_name: str) -> None:
-    """
-    Strands agent ECS Fargate service for long-running/streaming agents.
+```
+Production deploys agents as Docker containers on AgentCore Runtime:
+  - Each agent = Dockerfile + agent.py + shared/ utilities
+  - AgentCore Runtime manages scaling, isolation, session persistence
+  - ARM64 Graviton containers for cost optimization
+  - VPC connectivity for private data sources
+  - 8-hour session persistence window
 
-    Components:
-      A) ECS Cluster
-      B) Fargate Task Definition with agent container
-      C) Fargate Service with auto-scaling
-
-    [Claude: include when SOW mentions long-running agents, streaming,
-     or multi-turn sessions exceeding 15 minutes.]
-    """
-
-    # =========================================================================
-    # A) ECS CLUSTER
-    # =========================================================================
-
-    self.ecs_cluster = ecs.Cluster(
-        self, "AgentCluster",
-        cluster_name=f"{{project_name}}-agents-{stage_name}",
-        vpc=self.vpc,
-        container_insights=True,
-    )
-
-    # =========================================================================
-    # B) FARGATE TASK DEFINITION
-    # =========================================================================
-
-    self.strands_agent_task_def = ecs.FargateTaskDefinition(
-        self, "StrandsAgentTaskDef",
-        family=f"{{project_name}}-strands-agent-{stage_name}",
-        cpu=1024,
-        memory_limit_mib=2048,
-        task_role=self.strands_agent_role,
-    )
-
-    self.strands_agent_task_def.add_container(
-        "AgentContainer",
-        container_name="strands-agent",
-        image=ecs.ContainerImage.from_asset("src/strands_agent_ecs"),
-        environment={
-            "STAGE": stage_name,
-            "DEFAULT_MODEL_ID": "anthropic.claude-sonnet-4-20250514-v1:0",
-            "SESSION_TABLE": self.agent_session_table.table_name,
-            "AGENT_ARTIFACTS_BUCKET": self.agent_artifacts_bucket.bucket_name,
-        },
-        logging=ecs.LogDrivers.aws_logs(
-            stream_prefix="strands-agent",
-            log_retention=logs.RetentionDays.ONE_MONTH,
-        ),
-        port_mappings=[ecs.PortMapping(container_port=8080)],
-        health_check=ecs.HealthCheck(
-            command=["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"],
-            interval=Duration.seconds(30),
-            timeout=Duration.seconds(5),
-            retries=3,
-        ),
-    )
-
-    # =========================================================================
-    # C) FARGATE SERVICE
-    # =========================================================================
-
-    self.strands_agent_service = ecs.FargateService(
-        self, "StrandsAgentService",
-        service_name=f"{{project_name}}-strands-agent-{stage_name}",
-        cluster=self.ecs_cluster,
-        task_definition=self.strands_agent_task_def,
-        desired_count=1 if stage_name == "dev" else 2,
-        assign_public_ip=False,
-        security_groups=[self.ecs_sg],
-        vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-    )
-
-    # Auto-scaling
-    scaling = self.strands_agent_service.auto_scale_task_count(
-        min_capacity=1 if stage_name == "dev" else 2,
-        max_capacity=5 if stage_name == "dev" else 20,
-    )
-    scaling.scale_on_cpu_utilization("CpuScaling", target_utilization_percent=70)
+NOT ECS Fargate — AgentCore Runtime replaces ECS for agent workloads.
+ECS is only used for non-agent workloads (PDF generation, ETL, etc.)
 ```
 
 ---
 
-## Dockerfile — Pass 3 Reference
+## Agent Dockerfile — Pass 3 Reference
 
 ```dockerfile
-FROM python:3.12-slim
+# agents/observer/Dockerfile
+FROM python:3.13-slim
 WORKDIR /app
-COPY requirements.txt .
+
+# Copy shared utilities first (cached layer)
+COPY shared/ ./shared/
+COPY evaluations/ ./evaluations/
+
+# Copy agent-specific code
+COPY observer/ ./observer/
+COPY observer/requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-EXPOSE 8080
-CMD ["python", "server.py"]
+
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-m", "observer.agent"]
 ```
 
 ---
 
-## FastAPI Server — Pass 3 Reference
+## Agent Entry Point (BedrockAgentCoreApp) — Pass 3 Reference
 
 ```python
-"""ECS agent server with streaming support."""
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+"""Agent entry point for AgentCore Runtime deployment."""
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands import Agent
 from strands.models import BedrockModel
-import os, json, asyncio
 
-app = FastAPI()
+app = BedrockAgentCoreApp()
 
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
+@app.entrypoint
+def invoke(payload):
+    query = payload.get('prompt', '')
+    model = BedrockModel(model_id=os.environ.get('DEFAULT_MODEL_ID'))
+    agent = Agent(model=model, system_prompt=SYSTEM_PROMPT, tools=[...])
+    result = agent(query)
+    return {"result": str(result)}
 
-@app.post("/agent/invoke")
-async def invoke(request: dict):
-    agent = Agent(
-        model=BedrockModel(model_id=os.environ["DEFAULT_MODEL_ID"]),
-        system_prompt="You are helpful.",
-        tools=[],
-    )
-    response = agent(request.get("message", ""))
-    return {"response": str(response)}
-
-@app.post("/agent/stream")
-async def stream(request: dict):
-    """Streaming agent response via SSE."""
-    async def generate():
-        agent = Agent(
-            model=BedrockModel(model_id=os.environ["DEFAULT_MODEL_ID"]),
-            system_prompt="You are helpful.",
-        )
-        # [Claude: implement streaming callback for token-level streaming]
-        response = agent(request.get("message", ""))
-        yield f"data: {json.dumps({'content': str(response)})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+if __name__ == "__main__":
+    app.run()
 ```
+
+---
+
+## CDK: AgentRuntime Construct — Pass 2A Reference
+
+```typescript
+// Uses the reusable AgentRuntime construct (see AGENTCORE_RUNTIME.md)
+import { AgentRuntime } from '../../constructs/agent-runtime';
+
+new AgentRuntime(this, 'Observer', {
+  agentName: 'observer',
+  runtimeName: 'observer_agent_v3',
+  ssmOutputPath: '/{{project_name}}/agents/observer_agent_arn',
+  environmentVariables: {
+    GATEWAY_URL: ssmLookup(this, '/{{project_name}}/mcp/gateway_endpoint'),
+  },
+  additionalPolicies: [
+    new iam.PolicyStatement({
+      actions: ['bedrock-agentcore:InvokeGateway'],
+      resources: ['*'],
+    }),
+  ],
+});
+```
+
+---
+
+## requirements.txt (per agent)
+
+```
+strands-agents>=0.1.0
+strands-agents-tools>=0.1.0
+bedrock-agentcore>=0.1.0
+boto3>=1.35.0
+```
+
+---
+
+## When to Use AgentCore Runtime vs ECS Fargate
+
+| Criteria | AgentCore Runtime | ECS Fargate |
+|----------|-------------------|-------------|
+| Agent workloads | ✅ Purpose-built | Overkill |
+| Session isolation | ✅ microVM per session | Shared container |
+| Auto-scaling | ✅ Managed | Manual ASG config |
+| MCP server hosting | ✅ ProtocolType.MCP | Not supported |
+| Non-agent workloads | ❌ | ✅ PDF gen, ETL, batch |
+| Custom networking | Limited | Full control |

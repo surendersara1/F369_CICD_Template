@@ -1,216 +1,187 @@
-# PARTIAL: Strands Agent Frontend — WebSocket Chat UI
+# PARTIAL: Strands Agent Frontend — WebSocket Streaming, Portal, Callback Handler
 
-**Usage:** Include when SOW mentions agent chat UI, conversational interface, WebSocket streaming, or user-facing agent frontend.
+**Usage:** Include when SOW mentions agent chat UI, real-time streaming, WebSocket portal, or conversational interface.
 
 ---
 
-## Agent Frontend Overview
+## Frontend Architecture (from real production)
 
 ```
-Chat UI Stack:
-  React SPA → WebSocket (API GW v2) → Lambda → Strands Agent
+Portal Stack:
+  React SPA → WebSocket (API GW v2) → Lambda → invoke_agent_runtime()
        ↓              ↓                    ↓
-  Streaming msgs   $connect/$msg/$disconnect   Agent response
-  Session list     Connection DynamoDB table    Session DynamoDB
-  Cognito auth     REST fallback (API GW v1)   Artifacts S3
+  Real-time progress  $connect/$msg/$disconnect  Agent streams back via
+  steps from agent    Connection DynamoDB table   WebSocketCallbackHandler
+  Confidence scores   Cognito JWT auth            post_to_connection()
+  Chart rendering     REST fallback (API GW v1)   Presigned URL charts
+
+Key: Agent pushes REAL reasoning steps to portal via callback_handler,
+     not simulated progress messages.
 ```
 
 ---
 
-## CDK Code Block — WebSocket + Session REST
-
-```python
-def _create_agent_frontend(self, stage_name: str) -> None:
-    """
-    Agent chat frontend infrastructure.
-
-    Components:
-      A) WebSocket API (API GW v2) for streaming
-      B) WebSocket Lambda handlers ($connect, $message, $disconnect)
-      C) DynamoDB connection table
-      D) REST endpoints for session management
-      E) Frontend config SSM parameter
-
-    [Claude: include A+B+C for streaming chat.
-     Include D for session history/resume.
-     Always include E to wire frontend config.]
-    """
-
-    # A) WebSocket API
-    self.agent_ws_api = apigwv2.CfnApi(self, "AgentWSApi",
-        name=f"{{project_name}}-agent-ws-{stage_name}",
-        protocol_type="WEBSOCKET",
-        route_selection_expression="$request.body.action")
-
-    self.agent_ws_stage = apigwv2.CfnStage(self, "AgentWSStage",
-        api_id=self.agent_ws_api.ref, stage_name=stage_name, auto_deploy=True,
-        default_route_settings=apigwv2.CfnStage.RouteSettingsProperty(
-            throttling_rate_limit=100, throttling_burst_limit=200))
-
-    # B) WebSocket Lambda Role
-    ws_role = iam.Role(self, "WSLambdaRole",
-        assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-        managed_policies=[
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")])
-    ws_role.add_to_policy(iam.PolicyStatement(
-        actions=["execute-api:ManageConnections"],
-        resources=[f"arn:aws:execute-api:{self.region}:{self.account}:{self.agent_ws_api.ref}/{stage_name}/POST/@connections/*"]))
-    self.strands_agent_lambda.grant_invoke(ws_role)
-
-    ws_env = {
-        "STAGE": stage_name,
-        "CONNECTION_TABLE": f"{{project_name}}-ws-connections-{stage_name}",
-        "SESSION_TABLE": self.agent_session_table.table_name,
-        "AGENT_FUNCTION_NAME": self.strands_agent_lambda.function_name,
-        "WS_ENDPOINT": f"https://{self.agent_ws_api.ref}.execute-api.{self.region}.amazonaws.com/{stage_name}",
-    }
-
-    ws_fns = {}
-    for name, handler_path, timeout in [
-        ("Connect", "src/agent_frontend/ws_connect", 10),
-        ("Message", "src/agent_frontend/ws_message", 900),
-        ("Disconnect", "src/agent_frontend/ws_disconnect", 10),
-    ]:
-        ws_fns[name] = _lambda.Function(self, f"WS{name}Fn",
-            function_name=f"{{project_name}}-ws-{name.lower()}-{stage_name}",
-            runtime=_lambda.Runtime.PYTHON_3_13, architecture=_lambda.Architecture.ARM_64,
-            handler="index.handler", code=_lambda.Code.from_asset(handler_path),
-            environment=ws_env, timeout=Duration.seconds(timeout),
-            memory_size=256 if name != "Message" else 512, role=ws_role)
-
-    # Wire routes
-    for route_key, fn_id in [("$connect", "Connect"), ("$default", "Message"), ("$disconnect", "Disconnect")]:
-        integ = apigwv2.CfnIntegration(self, f"WSInt{fn_id}",
-            api_id=self.agent_ws_api.ref, integration_type="AWS_PROXY",
-            integration_uri=f"arn:aws:apigateway:{self.region}:lambda:path/2015-03-31/functions/{ws_fns[fn_id].function_arn}/invocations")
-        apigwv2.CfnRoute(self, f"WSRoute{fn_id}",
-            api_id=self.agent_ws_api.ref, route_key=route_key, target=f"integrations/{integ.ref}")
-        ws_fns[fn_id].add_permission(f"APIGW-{fn_id}",
-            principal=iam.ServicePrincipal("apigateway.amazonaws.com"),
-            source_arn=f"arn:aws:execute-api:{self.region}:{self.account}:{self.agent_ws_api.ref}/*")
-
-    # C) Connection Table
-    ws_conn_table = ddb.Table(self, "WSConnectionTable",
-        table_name=f"{{project_name}}-ws-connections-{stage_name}",
-        partition_key=ddb.Attribute(name="connection_id", type=ddb.AttributeType.STRING),
-        billing_mode=ddb.BillingMode.PAY_PER_REQUEST, time_to_live_attribute="ttl",
-        removal_policy=RemovalPolicy.DESTROY)
-    ws_conn_table.grant_read_write_data(ws_role)
-    self.agent_session_table.grant_read_write_data(ws_role)
-
-    # E) Frontend Config
-    ssm.StringParameter(self, "FrontendConfig",
-        parameter_name=f"/{{project_name}}/{stage_name}/agent-frontend-config",
-        string_value=json.dumps({
-            "cognito": {"user_pool_id": self.user_pool.user_pool_id,
-                "app_client_id": self.user_pool_client.user_pool_client_id},
-            "api": {"rest_endpoint": self.rest_api.url,
-                "ws_endpoint": f"wss://{self.agent_ws_api.ref}.execute-api.{self.region}.amazonaws.com/{stage_name}"},
-            "features": {"streaming_enabled": True, "session_history_enabled": True},
-        }))
-
-    CfnOutput(self, "AgentWSURL",
-        value=f"wss://{self.agent_ws_api.ref}.execute-api.{self.region}.amazonaws.com/{stage_name}")
-```
-
----
-
-## React Chat Hook — Pass 3 Reference
+## CDK: WebSocket API — Pass 2A Reference
 
 ```typescript
-/**useAgentChat — WebSocket streaming with REST fallback.*/
-import { useState, useEffect, useRef, useCallback } from 'react';
+// WebSocket API (API Gateway v2)
+const wsApi = new apigwv2.CfnApi(this, 'AgentWSApi', {
+  name: `{{project_name}}-agent-ws`,
+  protocolType: 'WEBSOCKET',
+  routeSelectionExpression: '$request.body.action',
+});
 
-interface ChatMessage { role: 'user' | 'assistant'; content: string; timestamp: string; }
+// WebSocket handlers
+const wsMessageFn = new lambda.Function(this, 'WSMessageFn', {
+  functionName: `{{project_name}}-ws-message`,
+  runtime: lambda.Runtime.PYTHON_3_13,
+  handler: 'handler.handler',
+  code: lambda.Code.fromAsset('lambda/websocket_handler'),
+  timeout: cdk.Duration.minutes(15),
+  memorySize: 512,
+});
 
-export function useAgentChat(sessionId?: string) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [currentSessionId] = useState(sessionId || crypto.randomUUID());
-  const wsRef = useRef<WebSocket | null>(null);
-
-  const connectWS = useCallback(async () => {
-    const ws = new WebSocket(`${CONFIG.wsEndpoint}?session_id=${currentSessionId}`);
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'message') {
-        setMessages(prev => [...prev, { role: 'assistant', content: data.content, timestamp: data.timestamp }]);
-        setIsStreaming(false);
-      } else if (data.type === 'status' && data.status === 'thinking') {
-        setIsStreaming(true);
-      }
-    };
-    wsRef.current = ws;
-  }, [currentSessionId]);
-
-  const sendMessage = useCallback(async (content: string) => {
-    setMessages(prev => [...prev, { role: 'user', content, timestamp: new Date().toISOString() }]);
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ action: 'message', message: content, session_id: currentSessionId }));
-    }
-  }, [currentSessionId]);
-
-  useEffect(() => { connectWS(); return () => wsRef.current?.close(); }, [connectWS]);
-  return { messages, sendMessage, isStreaming, currentSessionId };
-}
+// Grant WebSocket management API access
+wsMessageFn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['execute-api:ManageConnections'],
+  resources: [`arn:aws:execute-api:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:${wsApi.ref}/*`],
+}));
 ```
 
 ---
 
-## WebSocket Handlers — Pass 3 Reference
+## WebSocket Callback Handler (Strands callback_handler) — Pass 3 Reference
 
-### ws_connect/index.py
+This is the real streaming pattern. The agent pushes actual reasoning steps to the portal.
+
 ```python
-"""$connect — register WebSocket connection."""
-import boto3, os, time
-ddb = boto3.resource("dynamodb")
-table = ddb.Table(os.environ["CONNECTION_TABLE"])
+"""WebSocket streaming callback — pushes REAL agent events to portal."""
+import json, logging, time
+import boto3
 
-def handler(event, context):
-    connection_id = event["requestContext"]["connectionId"]
-    query = event.get("queryStringParameters") or {}
-    table.put_item(Item={
-        "connection_id": connection_id,
-        "session_id": query.get("session_id", connection_id),
-        "ttl": int(time.time()) + 7200,
-    })
-    return {"statusCode": 200}
+class WebSocketCallbackHandler:
+    """Strands callback_handler — receives streaming events, pushes to WebSocket."""
+
+    TOOL_AGENT_MAP = {
+        'observer_agent': 'Observer',
+        'reasoner_agent': 'Reasoner',
+        'governance_agent': 'Governance',
+        'run_financial_analysis': 'Code Interpreter',
+        # [Claude: map tool names to display labels from SOW]
+    }
+
+    def __init__(self, connection_id: str, ws_endpoint: str):
+        self.connection_id = connection_id
+        self.ws_endpoint = ws_endpoint
+        self._apigw = boto3.client('apigatewaymanagementapi', endpoint_url=ws_endpoint)
+        self._step_count = 0
+        self._start_time = time.time()
+
+    def __call__(self, **kwargs):
+        """Strands callback protocol — receives streaming events from Agent."""
+        event = kwargs.get('event', {})
+
+        # Detect tool use start
+        tool_use = event.get('contentBlockStart', {}).get('start', {}).get('toolUse')
+        if tool_use:
+            self._step_count += 1
+            tool_name = tool_use.get('name', 'unknown')
+            self._post({
+                'type': 'progress',
+                'agent': self.TOOL_AGENT_MAP.get(tool_name, 'Agent'),
+                'detail': f'Calling {tool_name}...',
+                'step': self._step_count,
+                'elapsed_ms': int((time.time() - self._start_time) * 1000),
+            })
+
+        # Stream reasoning text (CoT)
+        reasoning = kwargs.get('reasoningText', '')
+        if reasoning:
+            self._post({'type': 'progress', 'agent': 'Supervisor',
+                        'phase': 'Reasoning', 'detail': reasoning[:200]})
+
+        # Stream LLM text tokens (batched)
+        data = kwargs.get('data', '')
+        if data and len(data) > 50:
+            self._post({'type': 'token', 'text': data})
+
+    def _post(self, data: dict):
+        try:
+            self._apigw.post_to_connection(
+                ConnectionId=self.connection_id, Data=json.dumps(data).encode())
+        except Exception:
+            pass
+
+    def send_custom_step(self, agent: str, phase: str, detail: str):
+        """Send custom progress step (for pre/post agent phases)."""
+        self._step_count += 1
+        self._post({'type': 'progress', 'agent': agent, 'phase': phase,
+                     'detail': detail, 'step': self._step_count})
 ```
 
-### ws_message/index.py
+---
+
+## WebSocket Message Handler — Pass 3 Reference
+
 ```python
-"""$message — invoke agent and post response back."""
-import boto3, os, json, time
-lambda_client = boto3.client("lambda")
+"""$message handler — invoke agent and stream response back."""
+import boto3, os, json, time, uuid
+
+agentcore_client = boto3.client('bedrock-agentcore')
 
 def handler(event, context):
-    connection_id = event["requestContext"]["connectionId"]
-    body = json.loads(event.get("body", "{}"))
-    mgmt = boto3.client("apigatewaymanagementapi", endpoint_url=os.environ["WS_ENDPOINT"])
+    connection_id = event['requestContext']['connectionId']
+    body = json.loads(event.get('body', '{}'))
+    query = body.get('message', '')
+    session_id = body.get('session_id', str(uuid.uuid4()))
+    role = body.get('role', 'cfo')
 
-    mgmt.post_to_connection(ConnectionId=connection_id,
-        Data=json.dumps({"type": "status", "status": "thinking"}).encode())
+    # Invoke supervisor agent on AgentCore Runtime
+    supervisor_arn = os.environ['SUPERVISOR_ARN']
+    resp = agentcore_client.invoke_agent_runtime(
+        agentRuntimeArn=supervisor_arn,
+        contentType='application/json',
+        payload=json.dumps({
+            'prompt': query,
+            'role': role,
+            'runtimeSessionId': session_id,
+            'connectionId': connection_id,
+            'wsEndpoint': os.environ['WS_ENDPOINT'],
+        }).encode('utf-8'),
+        qualifier='DEFAULT',
+        runtimeSessionId=session_id,
+    )
 
-    response = lambda_client.invoke(
-        FunctionName=os.environ["AGENT_FUNCTION_NAME"],
-        Payload=json.dumps({"message": body.get("message", ""), "session_id": body.get("session_id")}))
-    payload = json.loads(response["Payload"].read())
-    agent_body = json.loads(payload.get("body", "{}"))
+    result = json.loads(resp.get('response').read().decode('utf-8'))
 
-    mgmt.post_to_connection(ConnectionId=connection_id,
-        Data=json.dumps({"type": "message", "content": agent_body.get("response", ""),
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ")}).encode())
-    return {"statusCode": 200}
+    # Send final response
+    mgmt = boto3.client('apigatewaymanagementapi', endpoint_url=os.environ['WS_ENDPOINT'])
+    mgmt.post_to_connection(
+        ConnectionId=connection_id,
+        Data=json.dumps({'type': 'response', 'data': result}).encode())
+
+    return {'statusCode': 200}
 ```
 
-### ws_disconnect/index.py
-```python
-"""$disconnect — clean up connection."""
-import boto3, os
-ddb = boto3.resource("dynamodb")
-table = ddb.Table(os.environ["CONNECTION_TABLE"])
+---
 
-def handler(event, context):
-    table.delete_item(Key={"connection_id": event["requestContext"]["connectionId"]})
-    return {"statusCode": 200}
+## Usage in Supervisor Agent
+
+```python
+# Wire callback to Strands Agent for real streaming
+callbacks = []
+if connection_id and ws_endpoint:
+    ws_cb = WebSocketCallbackHandler(connection_id, ws_endpoint)
+    callbacks.append(ws_cb)
+    # Send pre-synthesis progress steps
+    ws_cb.send_custom_step('Supervisor', 'RBAC', f'Loaded {actor_id} policy')
+    ws_cb.send_custom_step('Supervisor', 'Model', f'Using {model_id}')
+
+synthesizer = Agent(
+    model=model,
+    tools=[...],
+    system_prompt=SYSTEM_PROMPT,
+    callback_handler=callbacks[0] if callbacks else None,
+    session_manager=sess_mgr,
+)
 ```
