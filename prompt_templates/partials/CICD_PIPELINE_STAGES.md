@@ -1,295 +1,267 @@
-# PARTIAL: CICD Pipeline Stages Configuration
+# SOP — CI/CD Pipeline (GitHub Actions + CDK + OIDC)
 
-**Usage:** Referenced by `02B_PIPELINE_STACK_GENERATOR.md` for approval gates and stage configs.
-
----
-
-## The Three-Environment Pattern
-
-```
-┌─────────────┐     ┌──────────────┐     ┌───────────────┐     ┌────────────────┐     ┌──────────────┐
-│   SOURCE     │────▶│    BUILD     │────▶│  DEV STAGE   │────▶│ STAGING STAGE  │────▶│  PROD STAGE  │
-│  (Git Push)  │     │ (CDK Synth)  │     │ (Auto Deploy) │     │ (Auto Deploy)  │     │(Manual Appvl)│
-└─────────────┘     └──────────────┘     └───────────────┘     └────────────────┘     └──────────────┘
-                           │                      │                      │                      │
-                      Unit Tests             Smoke Tests          Integration          Smoke Tests
-                      Sec Scan               (Post-Deploy)           Tests             Rollback
-                                                                  (Pre-Deploy)         Monitor
-```
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** GitHub Actions · AWS CDK v2 (Python) · OIDC-federated role assumption (no long-lived keys)
 
 ---
 
-## Stage Definitions
+## 1. Purpose
 
-### Stage 1: Source
+Source-controlled delivery pipeline:
 
-```python
-# CodeCommit source
-source = pipelines.CodePipelineSource.code_commit(
-    codecommit.Repository.from_repository_name(self, "Repo", "{{project_name}}-repo"),
-    "main",
-    action_name="Source",
-    code_build_clone_output=True,
-)
+- Branch strategy: `main` → prod, `develop` → staging, PR → synth-only
+- OIDC federation (no AWS access keys in GitHub)
+- Lint + type-check + unit tests + cdk-nag → cdk diff → manual approval → deploy
+- Per-environment accounts (poc, stage, prod)
+- Optional: CDK Pipelines (self-mutating) for multi-account
 
-# OR GitHub source
-source = pipelines.CodePipelineSource.git_hub(
-    "{{org}}/{{project_name}}",
-    "main",
-    authentication=SecretValue.secrets_manager("github-token"),
-)
-```
-
-### Stage 2: Build / Synth
-
-```python
-synth = pipelines.ShellStep(
-    "Synth",
-    input=source,
-    install_commands=[
-        "npm install -g aws-cdk@2",
-        "pip install -r requirements.txt",
-        "pip install -r requirements-dev.txt",
-    ],
-    commands=[
-        "# Security scan",
-        "bandit -r infrastructure/ src/ -ll -q",
-
-        "# Unit tests",
-        "pytest tests/unit/ -q --tb=short",
-
-        "# CDK synthesis",
-        "cdk synth --quiet",
-    ],
-    env={
-        "CDK_DEFAULT_ACCOUNT": self.account,
-        "CDK_DEFAULT_REGION": self.region,
-    },
-)
-```
-
-### Stage 3: Dev Deployment
-
-```python
-# === DEV STAGE (auto-deploy, no approval) ===
-dev_stage = pipeline.add_stage(
-    AppStage(self, "Dev", stage_name="dev",
-             env={"account": DEV_ACCOUNT, "region": AWS_REGION}),
-)
-
-# Post-deploy: smoke tests
-dev_stage.add_post(
-    pipelines.ShellStep(
-        "DevSmokeTests",
-        env_from_cfn_outputs={
-            "API_ENDPOINT": dev_stack.api_endpoint_output,
-            "FRONTEND_URL": dev_stack.frontend_url_output,
-        },
-        commands=[
-            "pip install requests pytest",
-            "pytest tests/smoke/ -v -m dev --tb=short",
-        ],
-    )
-)
-```
-
-### Stage 4: Integration Tests
-
-```python
-# === INTEGRATION TESTS (run against Dev environment before Staging) ===
-integration_tests = pipelines.ShellStep(
-    "IntegrationTests",
-    env_from_cfn_outputs={
-        "API_ENDPOINT": dev_stack.api_endpoint_output,
-        "TABLE_NAME": dev_stack.main_table_output,
-    },
-    commands=[
-        "pip install boto3 requests pytest pytest-asyncio",
-
-        "# Test API endpoints end-to-end",
-        "pytest tests/integration/ -v --tb=short -x --timeout=120",
-
-        "# Generate test report",
-        "pytest tests/integration/ --junitxml=test-results/integration.xml || true",
-    ],
-    primary_output_directory="test-results",
-)
-```
-
-### Stage 5: Staging Deployment
-
-```python
-# === STAGING STAGE (requires integration tests to pass) ===
-staging_stage = pipeline.add_stage(
-    AppStage(self, "Staging", stage_name="staging",
-             env={"account": STAGING_ACCOUNT, "region": AWS_REGION}),
-    pre=[integration_tests],  # Runs integration tests BEFORE staging deploy
-)
-
-# Post-deploy: performance baseline
-staging_stage.add_post(
-    pipelines.ShellStep(
-        "StagingPerformanceTest",
-        commands=[
-            "pip install locust requests",
-            "python tests/performance/baseline_check.py",
-        ],
-    )
-)
-```
-
-### Stage 6: Production Approval Gate
-
-```python
-# === MANUAL APPROVAL (between Staging and Production) ===
-approval = pipelines.ManualApprovalStep(
-    "ApproveProductionDeployment",
-    comment="""
-PRODUCTION DEPLOYMENT — APPROVAL REQUIRED
-
-Pre-flight checklist:
-✓ Dev smoke tests passed
-✓ Integration tests passed
-✓ Staging smoke tests passed
-✓ Performance baseline checked
-
-Action required:
-1. Review the Staging environment: https://staging.{{project_name}}.example.com
-2. Review CloudWatch dashboard: [Staging Dashboard Link]
-3. Confirm change request: CR-xxxx
-4. Click "Approve" below if satisfied
-
-ROLLBACK: If prod deploy fails, run:
-  aws codepipeline stop-pipeline-execution --pipeline-name {{project_name}}-Pipeline --abandon
-    """,
-)
-```
-
-### Stage 7: Production Deployment
-
-```python
-# === PRODUCTION STAGE (with rollback alarm) ===
-prod_stage = pipeline.add_stage(
-    AppStage(self, "Prod", stage_name="prod",
-             env={"account": PROD_ACCOUNT, "region": AWS_REGION}),
-    pre=[approval],
-)
-
-# Post-deploy: production smoke tests + notification
-prod_stage.add_post(
-    pipelines.ShellStep(
-        "ProdSmokeTests",
-        commands=[
-            "pip install requests pytest boto3",
-            "pytest tests/smoke/ -v -m prod --tb=short",
-
-            "# Notify Slack on success",
-            'python -c "import boto3; sns=boto3.client(\'sns\');'
-            'sns.publish(TopicArn=\'$NOTIFICATION_TOPIC\','
-            'Message=\'✅ {{project_name}} successfully deployed to Production\','
-            'Subject=\'Prod Deploy Success\')"',
-        ],
-        env={
-            "NOTIFICATION_TOPIC": self.failure_topic.topic_arn,
-        }
-    )
-)
-```
+This SOP covers the GitHub Actions path (primary) and CDK Pipelines (alternative). Not about stack-internal CI — that's the workloads' problem.
 
 ---
 
-## Multi-Account Configuration
+## 2. Decision — Monolith vs Micro-Stack
 
-```python
-# Account IDs per environment
-# In practice, store these in SSM Parameter Store or CDK context
-DEV_ACCOUNT     = app.node.try_get_context("dev_account")     or "111111111111"
-STAGING_ACCOUNT = app.node.try_get_context("staging_account") or "222222222222"
-PROD_ACCOUNT    = app.node.try_get_context("prod_account")    or "333333333333"
-AWS_REGION      = app.node.try_get_context("region")          or "us-east-1"
+N/A for pipelines. They're configuration, not CDK constructs. The pipeline deploys EITHER variant. Two sections below:
 
-# Each account must be bootstrapped with trust to the pipeline account:
-# cdk bootstrap aws://DEV_ACCOUNT/us-east-1 --trust PIPELINE_ACCOUNT --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
-# cdk bootstrap aws://STAGING_ACCOUNT/us-east-1 --trust PIPELINE_ACCOUNT ...
-# cdk bootstrap aws://PROD_ACCOUNT/us-east-1 --trust PIPELINE_ACCOUNT ...
-```
+- §3 — GitHub Actions workflow YAML (recommended)
+- §4 — CDK Pipelines CDK code (alternative, self-mutating, multi-account-friendly)
 
 ---
 
-## Emergency Rollback Procedures
+## 3. GitHub Actions (recommended)
 
-### Automatic Rollback (CloudWatch Alarm)
+### 3.1 Repository setup
 
-```python
-# Create alarm that triggers if error rate > 1% in prod
-prod_error_alarm = cw.Alarm(
-    self, "ProdErrorAlarm",
-    metric=cw.Metric(
-        namespace="AWS/Lambda",
-        metric_name="Errors",
-        statistic="Sum",
-        period=Duration.minutes(1),
-    ),
-    threshold=10,
-    evaluation_periods=2,
-    alarm_description="Lambda error rate exceeded threshold in production",
-    treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-)
-
-# Alarm action: notify team
-prod_error_alarm.add_alarm_action(
-    cw_actions.SnsAction(self.failure_topic)
-)
+```
+.github/
+  workflows/
+    ci.yml          # runs on every PR: lint, types, tests, cdk synth
+    deploy-poc.yml  # runs on push to develop: deploy to poc account
+    deploy-prod.yml # runs on push to main + manual approval: deploy to prod
 ```
 
-### Manual Emergency Rollback Commands
+### 3.2 `ci.yml`
 
-```bash
-# Stop the running pipeline execution
-aws codepipeline stop-pipeline-execution \
-    --pipeline-name {{project_name}}-Pipeline \
-    --pipeline-execution-id <execution-id> \
-    --abandon
+```yaml
+name: CI
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
 
-# Redeploy previous version via CloudFormation rollback
-aws cloudformation cancel-update-stack \
-    --stack-name {{project_name}}Stack-Prod
+permissions:
+  contents: read
+  id-token: write    # required for OIDC
 
-# Or deploy a specific previous revision
-git revert HEAD~1
-git push origin main  # Triggers pipeline again
+jobs:
+  lint-test-synth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install deps
+        run: |
+          pip install -r infrastructure/cdk/requirements.txt
+          pip install -r requirements-dev.txt
+          npm install -g aws-cdk
+
+      - name: Lint
+        run: |
+          black --check infrastructure backend tests
+          ruff check infrastructure backend tests
+
+      - name: Types
+        run: mypy infrastructure backend
+
+      - name: Unit tests
+        run: pytest tests/unit -v --cov=infrastructure --cov=backend --cov-report=term
+
+      # Offline synth — no AWS credentials used
+      - name: CDK synth (offline)
+        env:
+          CDK_DISABLE_VERSION_CHECK: "1"
+          DEPLOY_ENV: poc
+        run: |
+          cd infrastructure/cdk
+          cdk synth --all --no-lookups -q
+
+      - name: cdk-nag
+        run: |
+          cd infrastructure/cdk
+          cdk synth --all --no-lookups --validation
 ```
+
+### 3.3 `deploy-poc.yml` — OIDC role assumption
+
+```yaml
+name: Deploy POC
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  DEPLOY_ENV: poc
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: poc   # GitHub Environment with protection rules
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      # OIDC federation — no access keys required
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.POC_ACCOUNT_ID }}:role/github-actions-deploy
+          role-session-name: gh-actions-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install deps
+        run: |
+          pip install -r infrastructure/cdk/requirements.txt
+          npm install -g aws-cdk
+
+      - name: Diff
+        run: cd infrastructure/cdk && cdk diff --all
+
+      - name: Deploy
+        run: cd infrastructure/cdk && cdk deploy --all --require-approval never
+```
+
+### 3.4 OIDC trust role (one-time setup per account)
+
+```yaml
+# In a bootstrap CDK stack or Terraform, create:
+# - OIDC provider for token.actions.githubusercontent.com
+# - IAM role 'github-actions-deploy' with trust policy:
+
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::ACCT:oidc-provider/token.actions.githubusercontent.com" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+      "StringLike": { "token.actions.githubusercontent.com:sub": "repo:ORG/REPO:ref:refs/heads/develop" }
+    }
+  }]
+}
+```
+
+Permissions: least-privilege CloudFormation + the minimum to bootstrap-and-deploy your CDK stacks.
+
+### 3.5 Prod pipeline with approval gate
+
+```yaml
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    environment: prod   # configure GitHub Environment with required reviewers
+    steps:
+      - run: echo "Approved"
+
+  deploy:
+    needs: approve
+    runs-on: ubuntu-latest
+    # ... same OIDC + deploy as POC but using PROD_ACCOUNT_ID
+```
+
+### 3.6 GitHub Actions gotchas
+
+- **`id-token: write`** permission must be set at the job level for OIDC to work.
+- **OIDC role trust** must scope `sub` to specific branch/PR or tags. Open-ended `*` lets any workflow in any repo assume it.
+- **`cdk deploy --require-approval never`** disables the interactive prompt — safe only with pre-deploy diff review.
+- **Environment protection rules** (GitHub) give per-env required reviewers without inventing a custom approval system.
 
 ---
 
-## Approval Notification Email Template
+## 4. CDK Pipelines (alternative, self-mutating)
 
+```python
+from aws_cdk import pipelines
+
+
+class DeliveryPipelineStack(cdk.Stack):
+    def __init__(self, scope, **kwargs):
+        super().__init__(scope, "{project_name}-pipeline", **kwargs)
+
+        pipeline = pipelines.CodePipeline(
+            self, "Pipeline",
+            pipeline_name="{project_name}",
+            synth=pipelines.ShellStep(
+                "Synth",
+                input=pipelines.CodePipelineSource.connection(
+                    "ORG/REPO", "main",
+                    connection_arn="arn:aws:codeconnections:us-east-1:ACCT:connection/UUID",
+                ),
+                commands=[
+                    "pip install -r infrastructure/cdk/requirements.txt",
+                    "npm install -g aws-cdk",
+                    "cd infrastructure/cdk && cdk synth --all --no-lookups",
+                ],
+                primary_output_directory="infrastructure/cdk/cdk.out",
+            ),
+            cross_account_keys=True,
+        )
+
+        # POC wave
+        pipeline.add_stage(AppStage(self, "Poc",
+            env=cdk.Environment(account="POC_ACCT", region="us-east-1"),
+        ))
+
+        # Prod wave with manual approval
+        prod_stage = AppStage(self, "Prod",
+            env=cdk.Environment(account="PROD_ACCT", region="us-east-1"),
+        )
+        pipeline.add_stage(prod_stage, pre=[pipelines.ManualApprovalStep("ProdApproval")])
 ```
-Subject: [ACTION REQUIRED] {{project_name}} Production Deployment Approval
 
-A production deployment is waiting for your approval.
+### 4.1 CDK Pipelines gotchas
 
-Deployment Summary:
-  - Pipeline: {{project_name}}-Pipeline
-  - Time: {timestamp}
-  - Triggered by: {git_commit_author}
-  - Commit: {git_commit_sha} — {git_commit_message}
+- **`cross_account_keys=True`** required for multi-account stages.
+- **CodeStar connections** must be set up once manually (GitHub OAuth).
+- **Self-mutation** means the pipeline updates itself before deploying apps. First run usually needs a manual `cdk deploy` to bootstrap.
 
-Environments Status:
-  ✅ Dev — smoke tests passed
-  ✅ Integration tests — all {N} tests passed
-  ✅ Staging — performance baseline within threshold
+---
 
-Pre-Approval Checklist:
-  □ Reviewed staging environment
-  □ Change request approved: CR-____
-  □ On-call engineer notified: @{oncall_handle}
-  □ Rollback plan reviewed
+## 5. Stage matrix
 
-Approve here: {approval_url}
+| Stage | Triggers | Account | Approval |
+|---|---|---|---|
+| PR | pull_request | none (synth only) | none |
+| dev | push to `develop` | dev account | none |
+| staging | push to `develop` + optional tag `staging-*` | stage account | required reviewer |
+| prod | push to `main` | prod account | required reviewer(s) |
 
-If you have concerns, REJECT the deployment — the pipeline
-will notify the team and halt all production changes.
+---
 
-— {{project_name}} CI/CD System
-```
+## 6. References
+
+- `docs/Feature_Roadmap.md` — CI-00..CI-18
+- Related SOPs: `LAYER_BACKEND_LAMBDA` (tested artifacts), `LAYER_OBSERVABILITY` (post-deploy alarms), `LAYER_SECURITY` (least-privilege pipeline role)
+
+---
+
+## 7. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | OIDC-first. GitHub Actions as primary path, CDK Pipelines as alternative. |
+| 1.0 | 2026-03-05 | Initial. |

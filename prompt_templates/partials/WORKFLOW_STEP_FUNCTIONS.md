@@ -1,257 +1,318 @@
-# PARTIAL: Step Functions — Workflow Orchestration
+# SOP — Step Functions Workflow Orchestration
 
-**Usage:** Include when SOW contains multi-step workflows, saga patterns, human approvals in business logic, or complex retry/compensation logic.
-
----
-
-## When to Use Step Functions vs Lambda Chaining
-
-| Pattern                            | Lambda Chaining   | Step Functions                |
-| ---------------------------------- | ----------------- | ----------------------------- |
-| Steps < 3, simple sequence         | ✅ Fine           | Overkill                      |
-| Steps > 3 OR complex branching     | ❌ Gets messy     | ✅ Use this                   |
-| Needs retry with backoff           | ❌ Manual code    | ✅ Built-in                   |
-| Needs human approval in workflow   | ❌ Impossible     | ✅ .waitForTaskToken          |
-| Long-running (hours/days)          | ❌ Lambda timeout | ✅ Use this                   |
-| Need full audit trail of each step | ❌ DIY logging    | ✅ Built-in execution history |
-| Parallel branches                  | ❌ Complex        | ✅ Parallel state             |
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+) · Step Functions Standard + Express + Distributed Map
 
 ---
 
-## CDK Code Block — Step Functions
+## 1. Purpose
+
+State-machine orchestration for:
+
+- Multi-step business processes (saga, compensation)
+- Long-running async pipelines (Transcribe + Bedrock + persist)
+- Batch fan-out via Distributed Map (up to 10,000 parallel children)
+- Retry + catch + DLQ at the workflow level (not per-Lambda)
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| State machine + task-target Lambdas in one stack | **§3 Monolith Variant** |
+| State machine in `OrchestrationStack`, Lambdas in `ComputeStack`, buckets in `StorageStack` | **§4 Micro-Stack Variant** |
+
+**Why the split matters.**
+- `tasks.LambdaInvoke(lambda_function=fn)` across stacks auto-grants `lambda:InvokeFunction` on the Lambda's resource policy referencing the state machine's ARN → bidirectional export.
+- `audio_bucket.grant_read(sfn_role)` across stacks auto-grants KMS Decrypt on the bucket's encryption key in `SecurityStack` → same cycle we have seen repeatedly.
+- SFN's built-in SDK integrations for Transcribe / S3 / DDB need IAM actions on the SFN role — always identity-side.
+
+---
+
+## 3. Monolith Variant
 
 ```python
-def _create_workflows(self, stage_name: str) -> None:
-    """
-    AWS Step Functions state machines for complex multi-step workflows.
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as tasks,
+    aws_lambda as _lambda,
+    aws_logs as logs,
+    aws_iam as iam,
+)
 
-    Common patterns implemented:
-      A) Sequential workflow     (A → B → C → Done)
-      B) Parallel workflow       (A → [B, C] in parallel → D)
-      C) Saga / compensation     (A → B → C, on fail: undo B → undo A)
-      D) Human approval in loop  (Submit → Wait → Human approves → Continue)
 
-    [Claude: detect which pattern from Architecture Map by looking for:
-      - "approval workflow", "multi-step process" → pattern D
-      - "parallel processing", "concurrent" → pattern B
-      - "rollback on failure", "compensating transaction" → pattern C
-      - "pipeline", "sequential steps" → pattern A]
-    """
-
-    import aws_cdk.aws_stepfunctions as sfn
-    import aws_cdk.aws_stepfunctions_tasks as sfn_tasks
-
-    # =========================================================================
-    # PATTERN A: Sequential Workflow
-    # Example: Document Processing Pipeline
-    # Receive Upload → Scan Virus → Extract Text → Classify → Store → Notify
-    # =========================================================================
-
-    # Step 1: Trigger virus scan
-    scan_step = sfn_tasks.LambdaInvoke(
-        self, "VirusScanStep",
-        lambda_function=self.lambda_functions.get("VirusScanner", self.lambda_functions[list(self.lambda_functions.keys())[0]]),
-        output_path="$.Payload",    # Pass Lambda's return value to next state
-        retry_on_service_exceptions=True,
-        task_timeout=sfn.Timeout.duration(Duration.minutes(5)),
+def _create_workflow(self, stage: str) -> None:
+    # -- State machine role (monolith: L2 grants OK) -------------------------
+    sfn_role = iam.Role(
+        self, "StateMachineRole",
+        assumed_by=iam.ServicePrincipal("states.amazonaws.com"),
+        role_name=f"{{project_name}}-sfn-role-{stage}",
     )
+    # Monolith: direct L2 grants (same stack)
+    self.lambda_functions["Processing"].grant_invoke(sfn_role)
+    self.audio_bucket.grant_read(sfn_role)
+    self.transcript_bucket.grant_read_write(sfn_role)
 
-    # Step 2: Check scan result → branch on clean/infected
-    check_scan = sfn.Choice(self, "ScanClean?")
+    # -- States --------------------------------------------------------------
+    validate = sfn.Choice(self, "ValidateInput")
+    invalid  = sfn.Fail(self, "InputInvalid", cause="Missing job_id", error="ValidationError")
 
-    # Step 3a: If clean → extract content
-    extract_step = sfn_tasks.LambdaInvoke(
-        self, "ExtractTextStep",
-        lambda_function=self.lambda_functions.get("TextExtractor", self.lambda_functions[list(self.lambda_functions.keys())[0]]),
-        output_path="$.Payload",
-    )
-
-    # Step 3b: If infected → quarantine and notify
-    quarantine_step = sfn_tasks.LambdaInvoke(
-        self, "QuarantineStep",
-        lambda_function=self.lambda_functions.get("Quarantine", self.lambda_functions[list(self.lambda_functions.keys())[0]]),
-    )
-    quarantine_notify = sfn_tasks.SnsPublish(
-        self, "NotifyQuarantine",
-        topic=self.alert_topic,
-        message=sfn.TaskInput.from_json_path_at("States.Format('INFECTED FILE DETECTED: {}', $.s3_key)"),
-    )
-
-    # Step 4: Store result
-    store_step = sfn_tasks.DynamoPutItem(
-        self, "StoreResultStep",
-        table=list(self.ddb_tables.values())[0],
-        item={
-            "pk": sfn_tasks.DynamoAttributeValue.from_string(
-                sfn.JsonPath.string_at("$.document_id")
-            ),
-            "sk": sfn_tasks.DynamoAttributeValue.from_string("DOCUMENT#PROCESSED"),
-            "status": sfn_tasks.DynamoAttributeValue.from_string("PROCESSED"),
+    start_transcribe = sfn.CustomState(
+        self, "StartTranscriptionJob",
+        state_json={
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob",
+            "Parameters": {
+                "TranscriptionJobName.$": "States.Format('job-{}', $.job_id)",
+                "LanguageCode": "en-US",
+                "Media": {"MediaFileUri.$": "States.Format('s3://{}/{}', $.audio_bucket, $.audio_key)"},
+                "OutputBucketName.$": "$.transcript_bucket",
+                "Settings": {"ShowSpeakerLabels": True, "MaxSpeakerLabels": 10},
+            },
+            "ResultPath": "$.transcribe_result",
+            "Retry": [{"ErrorEquals": ["Transcribe.LimitExceededException"],
+                        "IntervalSeconds": 5, "MaxAttempts": 5, "BackoffRate": 2.0}],
+            # NOTE: do NOT set "Next" here — use CDK chaining below so the
+            # state is attached to the graph exactly once.
         },
     )
 
-    # Step 5: Notify success via SNS
-    notify_success = sfn_tasks.SnsPublish(
-        self, "NotifySuccess",
-        topic=self.alert_topic,    # Replace with user notification topic
-        message=sfn.TaskInput.from_json_path_at(
-            "States.Format('Document {} processed successfully', $.document_id)"
-        ),
+    wait = sfn.Wait(self, "WaitForTranscription",
+                     time=sfn.WaitTime.duration(Duration.seconds(30)))
+
+    check = sfn.CustomState(
+        self, "CheckTranscribeStatus",
+        state_json={
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob",
+            "Parameters": {
+                "TranscriptionJobName.$": "$.transcribe_result.TranscriptionJob.TranscriptionJobName"
+            },
+            "ResultPath": "$.job_status",
+        },
     )
 
-    # Failure handler: catch any unhandled errors
-    workflow_failed = sfn.Fail(
-        self, "WorkflowFailed",
-        error="ProcessingFailed",
-        cause="Document processing pipeline failed",
+    is_done = sfn.Choice(self, "IsTranscribeComplete")
+    failed  = sfn.Fail(self, "TranscriptionFailed",
+                        cause="Transcribe returned FAILED", error="TranscribeError")
+
+    invoke_processing = tasks.LambdaInvoke(
+        self, "InvokeProcessing",
+        lambda_function=self.lambda_functions["Processing"],
+        payload=sfn.TaskInput.from_json_path_at("$"),
+        result_path="$.processing_result",
+    )
+    invoke_processing.add_retry(
+        errors=["States.TaskFailed"],
+        interval=Duration.seconds(2), max_attempts=3, backoff_rate=2.0,
     )
 
-    # Build state machine chain
-    definition = (
-        scan_step
-        .next(
-            check_scan
-            .when(
-                sfn.Condition.string_equals("$.scan_result", "CLEAN"),
-                extract_step.next(store_step).next(notify_success)
-            )
-            .when(
-                sfn.Condition.string_equals("$.scan_result", "INFECTED"),
-                quarantine_step.next(quarantine_notify)
-            )
-            .otherwise(workflow_failed)
-        )
-    )
+    complete = sfn.Pass(self, "MarkJobComplete",
+                        parameters={"status": "COMPLETE", "job_id.$": "$.job_id"})
 
-    # Add retry + error handling to each step
-    scan_step.add_retry(
-        errors=["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.TooManyRequestsException"],
-        interval=Duration.seconds(2),
-        max_attempts=3,
-        backoff_rate=2.0,         # Exponential backoff: 2s, 4s, 8s
-    )
-    scan_step.add_catch(workflow_failed, errors=["States.ALL"])
+    # -- Wire once -----------------------------------------------------------
+    wait.next(check).next(is_done)
+    is_done.when(
+        sfn.Condition.string_equals("$.job_status.TranscriptionJob.TranscriptionJobStatus", "COMPLETED"),
+        invoke_processing.next(complete),
+    ).when(
+        sfn.Condition.string_equals("$.job_status.TranscriptionJob.TranscriptionJobStatus", "FAILED"),
+        failed,
+    ).otherwise(wait)
 
-    # Log group for Step Functions execution history
-    sfn_log_group = logs.LogGroup(
-        self, "WorkflowLogGroup",
-        log_group_name=f"/{{project_name}}/{stage_name}/workflows",
+    validate.when(
+        sfn.Condition.not_(sfn.Condition.is_present("$.job_id")),
+        invalid,
+    ).otherwise(start_transcribe)
+
+    start_transcribe.next(wait)
+
+    # -- Logs + state machine ------------------------------------------------
+    log_group = logs.LogGroup(self, "SfnLogs",
+        log_group_name=f"/aws/states/{{project_name}}-pipeline-{stage}",
         retention=logs.RetentionDays.ONE_MONTH,
-        encryption_key=self.kms_key,
-        removal_policy=RemovalPolicy.DESTROY,
     )
-
-    # State Machine
-    self.doc_processing_sm = sfn.StateMachine(
-        self, "DocProcessingStateMachine",
-        state_machine_name=f"{{project_name}}-doc-processing-{stage_name}",
-        definition_body=sfn.DefinitionBody.from_chainable(definition),
-
-        # Express for high-throughput (100k exec/sec), sync execution
-        # Standard for long-running (up to 1 year), async, full audit history
-        state_machine_type=sfn.StateMachineType.EXPRESS if stage_name == "dev" else sfn.StateMachineType.STANDARD,
-
-        # Timeout for entire execution
-        timeout=Duration.minutes(30),
-
-        # Logging
-        logs=sfn.LogOptions(
-            destination=sfn_log_group,
-            level=sfn.LogLevel.ERROR if stage_name == "prod" else sfn.LogLevel.ALL,
-            include_execution_data=stage_name != "prod",  # Don't log PHI to CloudWatch in prod
-        ),
-
-        # X-Ray tracing
+    self.state_machine = sfn.StateMachine(
+        self, "Pipeline",
+        state_machine_name=f"{{project_name}}-pipeline-{stage}",
+        definition_body=sfn.DefinitionBody.from_chainable(validate),
+        role=sfn_role,
         tracing_enabled=True,
-    )
-
-    # Grant Lambda functions permission to be invoked by Step Functions
-    for fn in self.lambda_functions.values():
-        fn.grant_invoke(self.doc_processing_sm)
-
-    # Grant Lambda (trigger) permission to start the state machine
-    if "DocumentUpload" in self.lambda_functions:
-        self.doc_processing_sm.grant_start_execution(self.lambda_functions["DocumentUpload"])
-
-    # =========================================================================
-    # PATTERN D: Human Approval in Workflow (waitForTaskToken)
-    # Used for business approval gates WITHIN a workflow (not CICD approvals)
-    # Example: "Manager must approve expense report before payment"
-    # =========================================================================
-
-    # The task callback pattern:
-    # 1. Workflow sends email with a unique task token
-    # 2. Workflow PAUSES, waiting for the token to be returned
-    # 3. Human clicks approve link → Lambda calls sfn.send_task_success(token)
-    # 4. Workflow resumes from where it paused
-
-    approval_task = sfn_tasks.SnsPublish(
-        self, "SendApprovalEmail",
-        topic=self.approval_topic if hasattr(self, 'approval_topic') else self.alert_topic,
-
-        # Include the task token in the message payload
-        # Approver's Lambda/API will call SendTaskSuccess with this token
-        message=sfn.TaskInput.from_object({
-            "approval_url": sfn.JsonPath.string_at("$.approval_url"),
-            "request_id": sfn.JsonPath.string_at("$.request_id"),
-            "task_token": sfn.JsonPath.task_token,  # The magic token
-            "details": sfn.JsonPath.string_at("$.details"),
-        }),
-
-        # .wait_for_task_token PAUSES the workflow here until token is returned
-        integration_pattern=sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
-
-        # Heartbeat: if no heartbeat received, fail after 7 days (business SLA)
-        heartbeat=Duration.days(7),
-
-        task_timeout=sfn.Timeout.duration(Duration.days(7)),
-    )
-
-    # =========================================================================
-    # PATTERN B: Parallel State
-    # Example: After document upload, simultaneously: scan virus + extract metadata
-    # =========================================================================
-
-    parallel_processing = sfn.Parallel(self, "ParallelProcessing")
-    parallel_processing.branch(
-        sfn_tasks.LambdaInvoke(
-            self, "ParallelVirusScan",
-            lambda_function=self.lambda_functions.get("VirusScanner", list(self.lambda_functions.values())[0]),
-        )
-    )
-    parallel_processing.branch(
-        sfn_tasks.LambdaInvoke(
-            self, "ParallelMetadataExtract",
-            lambda_function=self.lambda_functions.get("MetadataExtractor", list(self.lambda_functions.values())[0]),
-        )
-    )
-    # parallel_processing runs BOTH branches simultaneously, waits for both to finish
-
-    # =========================================================================
-    # MAP STATE: Process a list of items in parallel (dynamic parallelism)
-    # Example: Generate 10 report sections simultaneously
-    # =========================================================================
-
-    map_state = sfn.Map(
-        self, "ProcessSections",
-        items_path="$.sections",      # Array in input
-        result_path="$.section_results",
-        max_concurrency=5,            # Max 5 parallel iterations
-    )
-    map_state.item_processor(
-        sfn_tasks.LambdaInvoke(
-            self, "ProcessSection",
-            lambda_function=self.lambda_functions.get("SectionProcessor", list(self.lambda_functions.values())[0]),
-            output_path="$.Payload",
-        )
-    )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "DocProcessingStateMachineArn",
-        value=self.doc_processing_sm.state_machine_arn,
-        description="Document Processing State Machine ARN",
-        export_name=f"{{project_name}}-doc-processing-sm-{stage_name}",
+        logs=sfn.LogOptions(destination=log_group, level=sfn.LogLevel.ALL,
+                             include_execution_data=True),
+        timeout=Duration.minutes(30),
     )
 ```
+
+### 3.1 Monolith gotchas
+
+- **Never call `.next()` twice on the same state.** CDK enforces "state X already has a next" validation. If a state is the target of a loop (e.g. `wait.next(check)` plus `is_done.otherwise(wait)`), chain it ONCE via CDK; the `.otherwise(wait)` jumps to the already-chained state without re-chaining.
+- **Don't mix `"Next"` in `state_json` AND `.next()` in CDK** — the first sets it in raw ASL, the second asserts it in CDK's graph. CDK will either silently overwrite or fail validation.
+- **Distributed Map** needs `item_reader` + `item_batcher` properly configured. See §4.3.
+
+---
+
+## 4. Micro-Stack Variant
+
+### 4.1 `OrchestrationStack` — identity-side grants on SFN role
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as tasks,
+    aws_lambda as _lambda,
+    aws_s3 as s3,
+    aws_logs as logs,
+    aws_iam as iam,
+)
+from constructs import Construct
+
+
+class OrchestrationStack(cdk.Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        processing_fn: _lambda.IFunction,
+        audio_bucket: s3.IBucket,
+        transcript_bucket: s3.IBucket,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-orchestration", **kwargs)
+
+        # Role lives in THIS stack. Grants are identity-side on it.
+        sfn_role = iam.Role(
+            self, "StateMachineRole",
+            assumed_by=iam.ServicePrincipal("states.amazonaws.com"),
+            role_name="{project_name}-sfn-role",
+        )
+        # Lambda invoke permission (identity-side — does NOT mutate processing_fn)
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[processing_fn.function_arn, f"{processing_fn.function_arn}:*"],
+        ))
+        # S3 reads on audio bucket; writes on transcript bucket — identity-side
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:ListBucket"],
+            resources=[audio_bucket.bucket_arn, audio_bucket.arn_for_objects("*")],
+        ))
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
+            resources=[transcript_bucket.bucket_arn, transcript_bucket.arn_for_objects("*")],
+        ))
+        # Transcribe via SDK integration
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            actions=["transcribe:StartTranscriptionJob", "transcribe:GetTranscriptionJob"],
+            resources=["*"],
+        ))
+        # X-Ray
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            actions=["xray:PutTraceSegments", "xray:PutTelemetryRecords",
+                     "xray:GetSamplingRules", "xray:GetSamplingTargets"],
+            resources=["*"],
+        ))
+
+        # ... states identical to §3, wired via CDK chaining once each ...
+
+        log_group = logs.LogGroup(
+            self, "SfnLogs",
+            log_group_name="/aws/states/{project_name}-pipeline",
+            retention=logs.RetentionDays.ONE_MONTH,
+        )
+
+        self.state_machine = sfn.StateMachine(
+            self, "Pipeline",
+            state_machine_name="{project_name}-pipeline",
+            definition_body=sfn.DefinitionBody.from_chainable(validate),  # same graph
+            role=sfn_role,
+            tracing_enabled=True,
+            logs=sfn.LogOptions(
+                destination=log_group, level=sfn.LogLevel.ALL,
+                include_execution_data=True,
+            ),
+            timeout=Duration.minutes(30),
+        )
+
+        cdk.CfnOutput(self, "StateMachineArn", value=self.state_machine.state_machine_arn)
+```
+
+### 4.2 `tasks.LambdaInvoke` is SAFE in micro-stack
+
+`tasks.LambdaInvoke(lambda_function=fn)` alone does NOT auto-grant cross-stack — it uses the SFN role's identity policy when `role` is provided. The CYCLE only forms if you also call `fn.grant_invoke(sfn_role)` from orchestration stack (which would add `sfn_role.arn` to the function's resource policy in ComputeStack).
+
+**Rule:** use `tasks.LambdaInvoke(...)` with an explicit `role=sfn_role` passed to the state machine, AND add `lambda:InvokeFunction` to sfn_role identity policy manually. Do not call `fn.grant_invoke(role)`.
+
+### 4.3 Distributed Map for batch
+
+```python
+distributed_map = sfn.DistributedMap(
+    self, "BatchFanout",
+    max_concurrency=100,
+    item_reader=sfn.S3JsonItemReader(bucket=audio_bucket, key="batches/{job_batch_id}.json"),
+    item_batcher=sfn.ItemBatcher(max_items_per_batch=10),
+    result_writer=sfn.ResultWriter(bucket=transcript_bucket, prefix="aggregate-results/"),
+    tolerated_failure_percentage=5,
+)
+# Each child runs an Express state machine (low-latency, cheap) with the same
+# core logic used in the Standard primary workflow.
+distributed_map.item_processor(
+    sfn.DefinitionBody.from_chainable(start_transcribe),
+    mode=sfn.ProcessorMode.DISTRIBUTED,
+    execution_type=sfn.ProcessorType.EXPRESS,
+)
+```
+
+### 4.4 Micro-stack gotchas
+
+- **Express workflows** don't support long-duration waits (>5 min) — use Standard for polling-heavy flows.
+- **Callback pattern** (task token + `SendTaskSuccess`) works cross-stack: consumer Lambda receives the task token, calls SFN API to resume. No cross-stack policy mutation.
+- **Distributed Map** requires the S3 input bucket to have a specific IAM set-up; add it identity-side on the SFN role.
+
+---
+
+## 5. Workflow patterns — when to use what
+
+| Pattern | Use |
+|---|---|
+| Single state machine, mixed parallel + sequential | Standard |
+| High-volume short tasks (< 5 min) | Express (5× cheaper, higher throughput) |
+| Fan-out > 40 concurrent | Distributed Map + Express children |
+| Long-running with manual approval | Standard + task token callback |
+| Near-realtime (< 100 ms orchestration overhead) | Step Functions is wrong tool; use EventBridge Pipes or direct Lambda chain |
+
+---
+
+## 6. Worked example
+
+```python
+def test_state_machine_has_x_ray_and_log_destination():
+    import aws_cdk as cdk
+    from aws_cdk.assertions import Template, Match
+    # ... instantiate OrchestrationStack ...
+    t = Template.from_stack(orch)
+    t.has_resource_properties("AWS::StepFunctions::StateMachine", {
+        "TracingConfiguration": {"Enabled": True},
+        "LoggingConfiguration": Match.object_like({"Level": "ALL"}),
+    })
+```
+
+---
+
+## 7. References
+
+- `docs/template_params.md` — `MAX_TRANSCRIBE_POLL_ATTEMPTS`, `TRANSCRIBE_POLL_INTERVAL_SECONDS`
+- `docs/Feature_Roadmap.md` — O-01..O-25
+- Related SOPs: `LAYER_BACKEND_LAMBDA` (task targets), `LLMOPS_BEDROCK` (Bedrock task integration)
+
+---
+
+## 8. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Rule: chain each state via CDK exactly once. Identity-side sfn_role grants in micro-stack. Distributed Map recipe. |
+| 1.0 | 2026-03-05 | Initial. |

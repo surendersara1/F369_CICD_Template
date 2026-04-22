@@ -1,301 +1,283 @@
-# PARTIAL: Observability Layer CDK Constructs
+# SOP — Observability Layer (CloudWatch, X-Ray, Logs Insights)
 
-**Usage:** Referenced by `02A_APP_STACK_GENERATOR.md` for the `_create_observability()` method body.
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+) · CloudWatch Dashboards + Alarms + Log Insights + X-Ray
 
 ---
 
-## CDK Code Block — Observability Layer
+## 1. Purpose
+
+Baseline observability consumed by every workload:
+
+- CloudWatch log groups with retention + KMS encryption
+- Structured JSON logging via Lambda Powertools (field set: `job_id`, `correlation_id`, `user_id`, `stage`)
+- X-Ray tracing on Lambda + SFN + API Gateway
+- Custom metric filters from log lines
+- CloudWatch dashboards (pipeline + costs + quotas)
+- Alarms → SNS → PagerDuty / Slack
+- Synthetic canaries (Phase 2)
+
+See also `OPS_ADVANCED_MONITORING` for deeper ops (log archiving, anomaly detection) and `OBS_OPENTELEMETRY_GRAFANA` for third-party export.
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| Observability defined alongside the workloads it monitors | **§3 Monolith Variant** |
+| Dedicated `ObservabilityStack` that references workloads across stacks | **§4 Micro-Stack Variant** |
+
+No cycle risk — ObservabilityStack reads metrics/ARNs from every other stack but never mutates them.
+
+---
+
+## 3. Monolith Variant
 
 ```python
-def _create_observability(self, stage_name: str) -> None:
-    """
-    Layer 6: Observability Infrastructure
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    aws_cloudwatch as cw,
+    aws_cloudwatch_actions as cw_actions,
+    aws_sns as sns,
+    aws_logs as logs,
+)
 
-    Components:
-      A) CloudWatch Log Groups (per Lambda + ECS)
-      B) CloudWatch Alarms (Lambda errors, RDS CPU, SQS DLQ)
-      C) CloudWatch Dashboard (unified view)
-      D) X-Ray Tracing (end-to-end distributed tracing)
-      E) SNS Alert Topic (alarm notifications to email/Slack)
-    """
 
-    # =========================================================================
-    # A) SNS ALERT TOPIC
-    # =========================================================================
-    self.alert_topic = sns.Topic(
-        self, "AlertTopic",
-        topic_name=f"{{project_name}}-alerts-{stage_name}",
-        display_name=f"{{project_name}} ({stage_name}) — Infrastructure Alerts",
+def _create_observability(self, stage: str) -> None:
+    self.ops_topic = sns.Topic(
+        self, "OpsAlerts",
+        topic_name=f"{{project_name}}-ops-{stage}",
         master_key=self.kms_key,
     )
 
-    # Email subscriptions (replace with actual alert emails from SOW/Architecture Map)
-    ALERT_EMAILS = [
-        "devops@example.com",
-        "platform-team@example.com",
-    ]
-    for email in ALERT_EMAILS:
-        self.alert_topic.add_subscription(
-            sns.subscriptions.EmailSubscription(email)
+    # -- Metric filters — turn structured log events into custom metrics -----
+    for fn_id, fn in self.lambda_functions.items():
+        log_group = fn.log_group
+        logs.MetricFilter(
+            self, f"{fn_id}ErrorFilter",
+            log_group=log_group,
+            metric_namespace=f"{{project_name}}/errors",
+            metric_name=f"{fn_id}ErrorCount",
+            filter_pattern=logs.FilterPattern.literal('{ $.level = "ERROR" }'),
+            metric_value="1",
         )
 
-    # =========================================================================
-    # B) CLOUDWATCH ALARMS
-    # =========================================================================
+    # -- Alarms --------------------------------------------------------------
+    for fn_id, fn in self.lambda_functions.items():
+        cw.Alarm(
+            self, f"{fn_id}ErrorRateAlarm",
+            alarm_name=f"{{project_name}}-{fn_id}-errors-{stage}",
+            metric=fn.metric_errors(period=Duration.minutes(5)),
+            threshold=5,
+            evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
 
-    alarm_defaults = dict(
-        treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-        evaluation_periods=2,
-        datapoints_to_alarm=2,
-    )
-
-    # --- Lambda Error Rate Alarm ---
-    # [Claude: generate one alarm per detected Lambda microservice]
-    for service_name, lambda_fn in self.lambda_functions.items():
-
-        # Error count alarm
-        error_alarm = cw.Alarm(
-            self, f"{service_name}ErrorAlarm",
-            alarm_name=f"{{project_name}}-{service_name}-errors-{stage_name}",
-            alarm_description=f"Lambda {service_name} error rate is too high",
-            metric=lambda_fn.metric_errors(
-                period=Duration.minutes(5),
-                statistic="Sum",
-            ),
-            threshold=5 if stage_name == "prod" else 10,
-            **alarm_defaults,
-        )
-        error_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-        error_alarm.add_ok_action(cw_actions.SnsAction(self.alert_topic))
-
-        # Duration alarm (approaching timeout)
-        duration_alarm = cw.Alarm(
-            self, f"{service_name}DurationAlarm",
-            alarm_name=f"{{project_name}}-{service_name}-duration-{stage_name}",
-            alarm_description=f"Lambda {service_name} approaching timeout",
-            metric=lambda_fn.metric_duration(
-                period=Duration.minutes(5),
-                statistic="p99",
-            ),
-            # Alert if p99 duration > 80% of configured timeout
-            threshold=lambda_fn.timeout.to_milliseconds() * 0.8,
-            **alarm_defaults,
-        )
-        duration_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        # Throttle alarm
-        throttle_alarm = cw.Alarm(
-            self, f"{service_name}ThrottleAlarm",
-            alarm_name=f"{{project_name}}-{service_name}-throttles-{stage_name}",
-            alarm_description=f"Lambda {service_name} is being throttled",
-            metric=lambda_fn.metric_throttles(
-                period=Duration.minutes(5),
-                statistic="Sum",
-            ),
-            threshold=1,
-            **alarm_defaults,
-        )
-        throttle_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    # --- Aurora CPU Alarm ---
-    aurora_cpu_alarm = cw.Alarm(
-        self, "AuroraCPUAlarm",
-        alarm_name=f"{{project_name}}-aurora-cpu-{stage_name}",
-        alarm_description="Aurora Serverless CPU utilization high",
-        metric=cw.Metric(
-            namespace="AWS/RDS",
-            metric_name="CPUUtilization",
-            dimensions_map={
-                "DBClusterIdentifier": self.aurora_cluster.cluster_identifier,
-            },
-            period=Duration.minutes(5),
-            statistic="Average",
-        ),
-        threshold=80,
-        **alarm_defaults,
-    )
-    aurora_cpu_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    # --- DLQ Depth Alarm (messages in dead letter queue = processing failures) ---
-    dlq_alarm = cw.Alarm(
-        self, "DLQDepthAlarm",
-        alarm_name=f"{{project_name}}-dlq-messages-{stage_name}",
-        alarm_description="Messages in DLQ — investigate Lambda/ECS failures",
-        metric=self.dlq.metric_approximate_number_of_messages_visible(
-            period=Duration.minutes(1),
-            statistic="Maximum",
-        ),
+    # DLQ depth alarm (messages visible)
+    cw.Alarm(
+        self, "DlqDepthAlarm",
+        alarm_name=f"{{project_name}}-dlq-depth-{stage}",
+        metric=self.fanout_dlq.metric_approximate_number_of_messages_visible(),
         threshold=1,
         evaluation_periods=1,
-        datapoints_to_alarm=1,
-        treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-    )
-    dlq_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
+        comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
 
-    # --- API Gateway 5xx Error Rate ---
-    api_5xx_alarm = cw.Alarm(
-        self, "Api5xxAlarm",
-        alarm_name=f"{{project_name}}-api-5xx-{stage_name}",
-        alarm_description="API Gateway 5xx error rate elevated",
-        metric=self.rest_api.metric_server_error(
-            period=Duration.minutes(5),
-            statistic="Sum",
-        ),
-        threshold=10 if stage_name == "prod" else 25,
-        **alarm_defaults,
-    )
-    api_5xx_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    # --- API Gateway Latency P99 ---
-    api_latency_alarm = cw.Alarm(
-        self, "ApiLatencyAlarm",
-        alarm_name=f"{{project_name}}-api-latency-{stage_name}",
-        alarm_description="API Gateway P99 latency exceeded SLA",
-        metric=self.rest_api.metric_latency(
-            period=Duration.minutes(5),
-            statistic="p99",
-        ),
-        threshold=3000,  # 3 seconds
-        **alarm_defaults,
-    )
-    api_latency_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    # =========================================================================
-    # C) CLOUDWATCH DASHBOARD
-    # =========================================================================
-
+    # -- Dashboard -----------------------------------------------------------
     dashboard = cw.Dashboard(
-        self, "MainDashboard",
-        dashboard_name=f"{{project_name}}-{stage_name}",
-        period_override=cw.PeriodOverride.AUTO,
+        self, "PipelineDashboard",
+        dashboard_name=f"{{project_name}}-pipeline-{stage}",
     )
-
-    # Row 1: API Gateway metrics
     dashboard.add_widgets(
-        cw.Row(
-            cw.GraphWidget(
-                title="API Gateway — Requests",
-                left=[self.rest_api.metric_count(period=Duration.minutes(1))],
-                right=[self.rest_api.metric_server_error(period=Duration.minutes(1))],
-                width=12,
-            ),
-            cw.GraphWidget(
-                title="API Gateway — Latency",
-                left=[
-                    self.rest_api.metric_latency(period=Duration.minutes(1), statistic="p50"),
-                    self.rest_api.metric_latency(period=Duration.minutes(1), statistic="p99"),
-                ],
-                width=12,
-            ),
-        )
-    )
-
-    # Row 2: Lambda metrics per microservice
-    lambda_widgets = []
-    for service_name, lambda_fn in self.lambda_functions.items():
-        lambda_widgets.append(
-            cw.GraphWidget(
-                title=f"Lambda: {service_name}",
-                left=[
-                    lambda_fn.metric_invocations(period=Duration.minutes(1)),
-                    lambda_fn.metric_errors(period=Duration.minutes(1)),
-                ],
-                right=[
-                    lambda_fn.metric_duration(period=Duration.minutes(1), statistic="p99"),
-                ],
-                width=8,
-            )
-        )
-    dashboard.add_widgets(cw.Row(*lambda_widgets))
-
-    # Row 3: Data layer metrics
-    dashboard.add_widgets(
-        cw.Row(
-            cw.GraphWidget(
-                title="Aurora — CPU & Connections",
-                left=[
-                    cw.Metric(
-                        namespace="AWS/RDS",
-                        metric_name="CPUUtilization",
-                        dimensions_map={"DBClusterIdentifier": self.aurora_cluster.cluster_identifier},
-                        period=Duration.minutes(1),
-                        statistic="Average",
-                    ),
-                ],
-                right=[
-                    cw.Metric(
-                        namespace="AWS/RDS",
-                        metric_name="DatabaseConnections",
-                        dimensions_map={"DBClusterIdentifier": self.aurora_cluster.cluster_identifier},
-                        period=Duration.minutes(1),
-                        statistic="Average",
-                    ),
-                ],
-                width=12,
-            ),
-            cw.GraphWidget(
-                title="SQS — Queue Depth",
-                left=[
-                    self.main_queue.metric_approximate_number_of_messages_visible(
-                        period=Duration.minutes(1),
-                        statistic="Maximum",
-                    ),
-                    self.dlq.metric_approximate_number_of_messages_visible(
-                        period=Duration.minutes(1),
-                        statistic="Maximum",
-                    ),
-                ],
-                width=12,
-            ),
-        )
-    )
-
-    # Row 4: Alarm status summary
-    dashboard.add_widgets(
-        cw.Row(
-            cw.AlarmStatusWidget(
-                title="System Health",
-                alarms=[
-                    aurora_cpu_alarm,
-                    dlq_alarm,
-                    api_5xx_alarm,
-                    api_latency_alarm,
-                ],
-                width=24,
-            )
-        )
-    )
-
-    # =========================================================================
-    # D) LOG INSIGHTS QUERIES (saved for quick access)
-    # =========================================================================
-
-    logs.QueryDefinition(
-        self, "ErrorPattern",
-        query_definition_name=f"{{project_name}}/{stage_name}/ErrorPatterns",
-        query_string=logs.QueryString(
-            fields=["@timestamp", "@message", "@logStream"],
-            filter_statements=['@message like /ERROR/ or @message like /Exception/'],
-            sort="@timestamp desc",
-            limit=100,
+        cw.GraphWidget(
+            title="Lambda Invocations + Errors",
+            left=[fn.metric_invocations() for fn in self.lambda_functions.values()],
+            right=[fn.metric_errors()      for fn in self.lambda_functions.values()],
+            width=24, height=6,
         ),
-        log_groups=[
-            # [Claude: Add all Lambda log groups here]
-        ],
-    )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-
-    CfnOutput(self, "DashboardURL",
-        value=f"https://console.aws.amazon.com/cloudwatch/home?region={self.region}#dashboards:name={{project_name}}-{stage_name}",
-        description="CloudWatch Dashboard URL",
-    )
-
-    CfnOutput(self, "AlertTopicArn",
-        value=self.alert_topic.topic_arn,
-        description="SNS Alert Topic ARN",
-        export_name=f"{{project_name}}-alert-topic-{stage_name}",
+        cw.GraphWidget(
+            title="SQS — Visible Messages",
+            left=[self.main_queue.metric_approximate_number_of_messages_visible()],
+            width=12, height=6,
+        ),
+        cw.SingleValueWidget(
+            title="Errors — last 1h",
+            metrics=[fn.metric_errors(period=Duration.hours(1)) for fn in self.lambda_functions.values()],
+            width=12, height=6,
+        ),
     )
 ```
+
+### 3.1 Monolith gotchas
+
+- **`metric_errors()` etc. are L2 helpers** that assume the Lambda's default CW namespace. Custom Lambda metrics emitted via Powertools live in a different namespace — reference them explicitly via `cw.Metric(namespace=..., metric_name=...)`.
+- **Composite alarms** (any of N breaches → page) are built with `cw.CompositeAlarm`.
+- **Log retention forever**: not possible; max 10 years. For compliance archiving, subscribe a log group to Kinesis Firehose → S3 Glacier (see `OPS_ADVANCED_MONITORING`).
+
+---
+
+## 4. Micro-Stack Variant
+
+### 4.1 `ObservabilityStack` — no mutation of upstream
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    aws_cloudwatch as cw,
+    aws_cloudwatch_actions as cw_actions,
+    aws_sns as sns,
+    aws_sqs as sqs,
+    aws_lambda as _lambda,
+    aws_rds as rds,
+    aws_stepfunctions as sfn,
+    aws_logs as logs,
+)
+from constructs import Construct
+
+
+class ObservabilityStack(cdk.Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        lambda_fns: dict[str, _lambda.IFunction],
+        state_machine: sfn.IStateMachine,
+        queues: dict[str, sqs.IQueue],
+        rds_instance: rds.IDatabaseInstance,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-observability", **kwargs)
+
+        self.ops_topic = sns.Topic(
+            self, "OpsAlerts",
+            topic_name="{project_name}-ops-alerts",
+        )
+
+        # Alarms — built from upstream metric ARNs (no mutation)
+        for fn_id, fn in lambda_fns.items():
+            cw.Alarm(
+                self, f"{fn_id}ErrorsAlarm",
+                alarm_name=f"{{project_name}}-{fn_id}-errors",
+                metric=fn.metric_errors(period=Duration.minutes(5)),
+                threshold=5, evaluation_periods=1,
+                comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
+
+        # SFN execution failure alarm
+        cw.Alarm(
+            self, "SfnFailuresAlarm",
+            alarm_name="{project_name}-sfn-failures",
+            metric=state_machine.metric_failed(period=Duration.minutes(5)),
+            threshold=1, evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
+
+        # DLQ depth alarms (one per queue whose name ends with 'dlq')
+        for qname, q in queues.items():
+            if "dlq" in qname.lower():
+                cw.Alarm(
+                    self, f"{qname}DepthAlarm",
+                    alarm_name=f"{{project_name}}-{qname}-depth",
+                    metric=q.metric_approximate_number_of_messages_visible(),
+                    threshold=1, evaluation_periods=1,
+                    comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
+
+        # RDS CPU alarm
+        cw.Alarm(
+            self, "RdsCpuAlarm",
+            alarm_name="{project_name}-rds-cpu",
+            metric=rds_instance.metric_cpu_utilization(period=Duration.minutes(5)),
+            threshold=80, evaluation_periods=3,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
+
+        # Dashboard
+        dashboard = cw.Dashboard(
+            self, "PipelineDashboard",
+            dashboard_name="{project_name}-pipeline",
+        )
+        dashboard.add_widgets(
+            cw.GraphWidget(
+                title="Lambda Errors",
+                left=[fn.metric_errors() for fn in lambda_fns.values()],
+                width=24, height=6,
+            ),
+            cw.GraphWidget(
+                title="Step Functions — Started / Succeeded / Failed",
+                left=[state_machine.metric_started(), state_machine.metric_succeeded()],
+                right=[state_machine.metric_failed()],
+                width=24, height=6,
+            ),
+        )
+
+        cdk.CfnOutput(self, "OpsTopicArn", value=self.ops_topic.topic_arn)
+```
+
+### 4.2 Micro-stack gotchas
+
+- **`fn.metric_errors()`** produces a reference to the Lambda's CW metric via `AWS/Lambda` namespace; no mutation of the Lambda itself.
+- **`log_group` on another stack's Lambda** is accessible via `fn.log_group` — reading, not writing, so no cycle.
+- **Metric filters** on cross-stack log groups — create them in the OWNING stack where the log group is. Emit the *metric* into a shared namespace that ObservabilityStack alarms on. This keeps the filter co-located with the source.
+
+---
+
+## 5. Structured log contract (Powertools)
+
+Every log line from every Lambda must carry:
+
+```json
+{
+  "level": "INFO",
+  "message": "transcription complete",
+  "service": "audio-analytics",
+  "job_id": "0190a1b2-...",
+  "correlation_id": "0190a1b2-...",
+  "user_id": "user-123",
+  "stage": "transcribe",
+  "timestamp": "2026-04-21T10:11:12.345Z"
+}
+```
+
+This enables Logs Insights queries like:
+
+```
+fields @timestamp, job_id, stage, message
+| filter correlation_id = "0190a1b2-..."
+| sort @timestamp asc
+```
+
+Single-query reconstruction of any job's full lifecycle.
+
+---
+
+## 6. Worked example
+
+```python
+def test_observability_creates_dashboard_and_ops_topic():
+    # ... instantiate ObservabilityStack with mock upstream resources ...
+    t = Template.from_stack(obs)
+    t.resource_count_is("AWS::CloudWatch::Dashboard", 1)
+    t.resource_count_is("AWS::SNS::Topic", 1)
+    t.has_resource("AWS::CloudWatch::Alarm", Match.any_value())
+```
+
+---
+
+## 7. References
+
+- `docs/Feature_Roadmap.md` — OBS-01..OBS-27, TRC-01..TRC-12
+- Related SOPs: `OPS_ADVANCED_MONITORING` (log archiving, anomaly detection), `OBS_OPENTELEMETRY_GRAFANA` (ADOT export), `LAYER_BACKEND_LAMBDA` (Powertools setup)
+
+---
+
+## 8. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Cross-stack safety: read upstream metrics/ARNs, never mutate. Structured log contract. |
+| 1.0 | 2026-03-05 | Initial. |

@@ -1,525 +1,454 @@
-# PARTIAL: Event-Driven Architecture — SNS, SQS Advanced, EventBridge, Kinesis
+# SOP — Event-Driven Patterns (SNS, SQS, EventBridge, Kinesis)
 
-**Usage:** Referenced by `02A_APP_STACK_GENERATOR.md` when SOW contains decoupling/async/event-driven patterns.
-
----
-
-## When to Include Each Service
-
-| SOW Signal                                              | Include                |
-| ------------------------------------------------------- | ---------------------- |
-| "decouple", "async", "fan-out", "pub/sub"               | SNS → SQS Fan-out      |
-| "ordered processing", "exactly-once", "FIFO"            | SQS FIFO Queue         |
-| "event bus", "domain events", "microservice events"     | EventBridge Custom Bus |
-| "streaming", "high-throughput events", ">1k events/sec" | Kinesis Data Streams   |
-| "S3 to pipeline", "file arrives → process"              | S3 Event Notifications |
-| "retry", "dead letter", "poison message"                | DLQ + Redrive Policy   |
-| "delay", "scheduled retry", "backoff"                   | SQS Delay Queue        |
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
 
-## PATTERN A: SNS → SQS Fan-out (Pub/Sub)
+## 1. Purpose
 
-The most important decoupling pattern. One publisher (SNS Topic) fans out to
-multiple subscribers (SQS Queues), each triggering a different Lambda/ECS consumer.
+Wiring between producers and consumers: SNS fan-out, SQS (standard + FIFO), EventBridge rules and custom buses, Kinesis streams, DLQ + redrive, scheduled triggers.
 
-```
-Publisher Lambda
-      │
-      ▼
-  SNS Topic ("order-created")
-      │
-   ┌──┴──────────────┬──────────────────┐
-   ▼                 ▼                  ▼
-SQS Queue         SQS Queue         SQS Queue
-(inventory)       (email-notify)    (analytics)
-   │                 │                  │
-   ▼                 ▼                  ▼
-Lambda            Lambda            Lambda/Firehose
-```
+This partial covers the *connectors*. The producers (Lambda, Fargate) come from `LAYER_BACKEND_LAMBDA` / `LAYER_BACKEND_ECS`. The target data stores come from `LAYER_DATA`.
+
+---
+
+## 2. When to include each service
+
+| SOW signal | Service |
+|---|---|
+| "decouple", "async", "fan-out", "pub/sub" | SNS → SQS Fan-out |
+| "ordered", "exactly-once", "FIFO" | SQS FIFO |
+| "event bus", "domain events", "microservice events" | EventBridge custom bus |
+| "streaming", "high-throughput events", ">1k events/sec" | Kinesis Data Streams |
+| "S3 to pipeline", "file arrives → process" | S3 → EventBridge (never direct S3 → Lambda at scale) |
+| "retry", "dead letter", "poison message" | DLQ + redrive |
+| "delay", "scheduled retry", "backoff" | SQS delay queue |
+
+---
+
+## 3. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| All producers, queues, and consumers in ONE stack class | **§4 Monolith Variant** |
+| Queues in `QueueStack`, buses in `EventStack`, consumers in `ComputeStack` (separate CDK stacks) | **§5 Micro-Stack Variant** |
+
+**Why the split matters.** Two common L2 helpers blow up across stacks:
+
+1. **`targets.SqsQueue(queue)`** on an EventBridge rule *auto-adds a resource policy* to the queue allowing the rule's ARN to send. If rule and queue are in different stacks → bidirectional export → cycle.
+2. **`queue.grant_send_messages(role)`** where `queue` and `role` are in different stacks does the same thing from the other direction.
+
+The Micro-Stack variant:
+- Uses L1 `events.CfnRule` (raw dict target) when the target lives in a different stack
+- Adds static-ARN resource policies to queues/topics manually
+- Grants consumers via identity-side policies on the consumer role
+
+---
+
+## 4. Monolith Variant
+
+### 4.1 SNS → SQS fan-out
 
 ```python
-def _create_event_bus(self, stage_name: str) -> None:
-    """
-    Pub/Sub Fan-out: SNS Topics → multiple SQS Queue subscribers.
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration, RemovalPolicy,
+    aws_sns as sns,
+    aws_sqs as sqs,
+    aws_sns_subscriptions as subs,
+    aws_iam as iam,
+)
 
-    Pattern: Publisher puts one SNS message → all SQS queues receive a copy.
-    Each queue has its own consumer (Lambda or ECS), fully decoupled.
-    """
 
-    # =========================================================================
-    # SNS TOPICS — One per domain event type
-    # [Claude: generate from Architecture Map detected event types]
-    # =========================================================================
-    TOPIC_DEFINITIONS = [
-        {
-            "id": "OrderCreated",
-            "name": "order-created",
-            "description": "Published when a new order is placed",
-            "subscribers": ["inventory-service", "email-notify", "analytics"],
-        },
-        {
-            "id": "UserRegistered",
-            "name": "user-registered",
-            "description": "Published when a new user signs up",
-            "subscribers": ["welcome-email", "crm-sync"],
-        },
-        # [Claude: add one entry per domain event from Architecture Map]
-    ]
+def _create_fanout(self, stage: str) -> None:
+    # One central topic
+    self.order_topic = sns.Topic(
+        self, "OrderCreatedTopic",
+        topic_name=f"{{project_name}}-order-created-{stage}",
+        master_key=self.kms_key,      # SSE-KMS
+    )
 
-    self.sns_topics: Dict[str, sns.Topic] = {}
-    self.subscriber_queues: Dict[str, sqs.Queue] = {}
-
-    for topic_config in TOPIC_DEFINITIONS:
-
-        # --- SNS Topic ---
-        topic = sns.Topic(
-            self, f"{topic_config['id']}Topic",
-            topic_name=f"{{project_name}}-{topic_config['name']}-{stage_name}",
-            display_name=topic_config["description"],
-            # Encrypt with KMS
-            master_key=self.kms_key,
-        )
-        self.sns_topics[topic_config["id"]] = topic
-
-        # --- SQS Subscribers (one queue per subscriber service) ---
-        for subscriber_name in topic_config["subscribers"]:
-
-            # Dead Letter Queue for this subscriber
-            dlq = sqs.Queue(
-                self, f"{topic_config['id']}{subscriber_name.replace('-','').capitalize()}DLQ",
-                queue_name=f"{{project_name}}-{subscriber_name}-{topic_config['name']}-dlq-{stage_name}",
-                encryption=sqs.QueueEncryption.KMS,
-                encryption_master_key=self.kms_key,
-                retention_period=Duration.days(14),
-                removal_policy=RemovalPolicy.DESTROY,
-            )
-
-            # Subscriber Queue
-            subscriber_queue = sqs.Queue(
-                self, f"{topic_config['id']}{subscriber_name.replace('-','').capitalize()}Queue",
-                queue_name=f"{{project_name}}-{subscriber_name}-{topic_config['name']}-{stage_name}",
-                encryption=sqs.QueueEncryption.KMS,
-                encryption_master_key=self.kms_key,
-
-                # Visibility timeout: must be >= Lambda timeout for this subscriber
-                visibility_timeout=Duration.seconds(300),
-
-                # Retention: messages not consumed within 4 days go to DLQ
-                retention_period=Duration.days(4),
-
-                # DLQ: after 3 failed processing attempts
-                dead_letter_queue=sqs.DeadLetterQueue(
-                    max_receive_count=3,
-                    queue=dlq,
-                ),
-
-                # Receive wait time: long polling (reduces empty receive API calls = cost saving)
-                receive_message_wait_time=Duration.seconds(20),
-
-                removal_policy=RemovalPolicy.DESTROY,
-            )
-
-            # Subscribe this SQS queue to the SNS topic
-            # RawMessageDelivery=True: SQS receives the raw payload, not SNS wrapper JSON
-            topic.add_subscription(
-                sns.subscriptions.SqsSubscription(
-                    subscriber_queue,
-                    raw_message_delivery=True,  # Cleaner payload for Lambda JSON parsing
-                    filter_policy={
-                        # Optional: filter messages by attribute
-                        # "event_type": sns.SubscriptionFilter.string_filter(allowlist=["ORDER_PLACED"])
-                    },
-                )
-            )
-
-            queue_key = f"{topic_config['id']}_{subscriber_name}"
-            self.subscriber_queues[queue_key] = subscriber_queue
-
-            # Grant Lambda (of same name) to consume from this queue
-            # [Claude: look up lambda_functions dict and grant if exists]
-            service_lambda_id = subscriber_name.replace("-", "_").title().replace("_", "")
-            if service_lambda_id in self.lambda_functions:
-                subscriber_queue.grant_consume_messages(self.lambda_functions[service_lambda_id])
-                self.lambda_functions[service_lambda_id].add_event_source(
-                    lambda_events.SqsEventSource(
-                        subscriber_queue,
-                        batch_size=10,
-                        max_batching_window=Duration.seconds(5),  # Batch for efficiency
-                        report_batch_item_failures=True,          # Partial batch failure support
-                    )
-                )
-```
-
----
-
-## PATTERN B: SQS FIFO Queue (Ordered, Exactly-Once)
-
-Use when SOW requires **ordered processing** or **exactly-once delivery**.
-
-```python
-def _create_fifo_queues(self, stage_name: str) -> None:
-    """
-    SQS FIFO Queues for ordered, exactly-once message processing.
-
-    Use cases:
-      - Financial transactions (process in order, never duplicate)
-      - Inventory updates (prevent oversell)
-      - State machine transitions (ordered state changes)
-
-    FIFO rules:
-      - MessageGroupId: messages within a group are strictly ordered
-      - MessageDeduplicationId: prevents duplicate processing (5-min window)
-      - Throughput: 300 msg/sec (3000 with high-throughput mode)
-    """
-
-    # FIFO DLQ (must also be FIFO)
-    fifo_dlq = sqs.Queue(
-        self, "FifoDLQ",
-        queue_name=f"{{project_name}}-fifo-dlq-{stage_name}.fifo",  # .fifo suffix required
-        fifo=True,
-        content_based_deduplication=True,
-        encryption=sqs.QueueEncryption.KMS,
+    # DLQ shared by fan-out consumers
+    self.fanout_dlq = sqs.Queue(
+        self, "FanoutDLQ",
+        queue_name=f"{{project_name}}-fanout-dlq-{stage}",
         encryption_master_key=self.kms_key,
         retention_period=Duration.days(14),
-        removal_policy=RemovalPolicy.DESTROY,
     )
 
-    # FIFO queue with high-throughput mode
-    self.fifo_queue = sqs.Queue(
-        self, "FifoQueue",
-        queue_name=f"{{project_name}}-ordered-{stage_name}.fifo",
-        fifo=True,
-
-        # Content-based deduplication: SQS hashes body as dedup ID
-        # (alternative: set MessageDeduplicationId explicitly per message)
-        content_based_deduplication=True,
-
-        # High-throughput FIFO: 3000 msg/sec per MessageGroup (vs 300 standard)
-        fifo_throughput_limit=sqs.FifoThroughputLimit.PER_MESSAGE_GROUP_ID,
-        deduplication_scope=sqs.DeduplicationScope.MESSAGE_GROUP,
-
-        encryption=sqs.QueueEncryption.KMS,
-        encryption_master_key=self.kms_key,
-
-        visibility_timeout=Duration.seconds(300),
-        retention_period=Duration.days(4),
-
-        dead_letter_queue=sqs.DeadLetterQueue(
-            max_receive_count=3,
-            queue=fifo_dlq,
-        ),
-
-        removal_policy=RemovalPolicy.DESTROY,
-    )
-```
-
----
-
-## PATTERN C: EventBridge Custom Event Bus
-
-Use for **domain events between microservices**. Unlike SNS, EventBridge supports
-complex routing rules, schema registry, archive & replay, and cross-account events.
-
-```python
-def _create_event_bus(self, stage_name: str) -> None:
-    """
-    Custom EventBridge Event Bus for domain events.
-
-    Architecture:
-      Any service → PutEvents → Custom Bus → Rules → Targets
-
-    Advantages over SNS:
-      - Content-based routing (route by event field values, not just type)
-      - Schema registry (auto-discover event schema)
-      - Archive & Replay (replay past events for debugging/recovery)
-      - Cross-account event routing
-      - EventBridge Pipes (connect SQS→Lambda without glue code)
-    """
-
-    # Custom Event Bus (events go here, NOT to the default bus)
-    self.event_bus = events.EventBus(
-        self, "DomainEventBus",
-        event_bus_name=f"{{project_name}}-events-{stage_name}",
-    )
-
-    # Encrypt event bus (attach resource policy)
-    # [EventBridge encryption applied via KMS key policy]
-
-    # Archive: retain all events for 30 days (1 year in prod)
-    # Allows replay of any past events for debugging or re-processing
-    self.event_bus.archive(
-        "EventArchive",
-        archive_name=f"{{project_name}}-event-archive-{stage_name}",
-        description="Archive of all domain events for replay",
-        event_pattern=events.EventPattern(source=events.Match.prefix("{{project_name}}")),
-        retention=Duration.days(30) if stage_name != "prod" else Duration.days(365),
-    )
-
-    # =========================================================================
-    # EVENT RULES — Route events to the right targets
-    # [Claude: generate from Architecture Map detected event flows]
-    # =========================================================================
-    EVENT_RULES = [
-        {
-            "id": "OrderCreatedRule",
-            "description": "Route order.created events to inventory + analytics",
-            "source": ["{{project_name}}.orders"],
-            "detail_type": ["order.created"],
-            "targets": ["inventory_lambda", "analytics_firehose"],
-        },
-        {
-            "id": "UserRegisteredRule",
-            "description": "Route user.registered to CRM sync and welcome email",
-            "source": ["{{project_name}}.users"],
-            "detail_type": ["user.registered"],
-            "targets": ["crm_sync_lambda"],
-        },
-    ]
-
-    for rule_config in EVENT_RULES:
-        rule = events.Rule(
-            self, rule_config["id"],
-            rule_name=f"{{project_name}}-{rule_config['id'].lower()}-{stage_name}",
-            description=rule_config["description"],
-            event_bus=self.event_bus,
-            event_pattern=events.EventPattern(
-                source=rule_config["source"],
-                detail_type=rule_config["detail_type"],
+    # Three subscriber queues, each triggering a different Lambda
+    for subscriber in ["inventory", "email-notify", "analytics"]:
+        q = sqs.Queue(
+            self, f"{subscriber.title().replace('-', '')}Queue",
+            queue_name=f"{{project_name}}-{subscriber}-{stage}",
+            encryption_master_key=self.kms_key,
+            visibility_timeout=Duration.seconds(180),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                max_receive_count=5, queue=self.fanout_dlq
             ),
         )
+        self.order_topic.add_subscription(subs.SqsSubscription(
+            q,
+            raw_message_delivery=True,
+            dead_letter_queue=self.fanout_dlq,
+        ))
+```
 
-        # Add Lambda targets
-        for target_id in rule_config["targets"]:
-            if target_id in self.lambda_functions:
-                rule.add_target(targets.LambdaFunction(
-                    self.lambda_functions[target_id],
-                    retry_attempts=2,
-                    dead_letter_queue=self.dlq,  # Failed event deliveries → DLQ
-                ))
+### 4.2 EventBridge custom bus + rules + archive
 
-    # =========================================================================
-    # EVENTBRIDGE PIPES — SQS → Lambda/ECS without glue Lambda
-    # [Native connector: polls SQS, filters, enriches, routes to target]
-    # =========================================================================
-    # Note: CDK L2 Pipes construct is in alpha — use CfnPipe (L1) for now
-    # pipes.CfnPipe(self, "SqsToEcsPipe", ...)
-    # [Claude: add if SOW requires SQS→ECS with filtering/enrichment]
+```python
+from aws_cdk import aws_events as events, aws_events_targets as targets
 
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "EventBusName",
-        value=self.event_bus.event_bus_name,
-        description="Custom EventBridge event bus name",
-        export_name=f"{{project_name}}-event-bus-{stage_name}",
+
+def _create_event_bus(self, stage: str) -> None:
+    self.bus = events.EventBus(
+        self, "DomainBus",
+        event_bus_name=f"{{project_name}}-domain-bus-{stage}",
     )
-    CfnOutput(self, "EventBusArn",
-        value=self.event_bus.event_bus_arn,
-        description="EventBridge event bus ARN (for cross-service PutEvents)",
-        export_name=f"{{project_name}}-event-bus-arn-{stage_name}",
+
+    # Archive (required for replay). 30-day retention default.
+    self.bus.archive(
+        "DomainArchive",
+        archive_name=f"{{project_name}}-domain-archive-{stage}",
+        retention=Duration.days(30),
+        event_pattern=events.EventPattern(source=events.Match.prefix("")),
+    )
+
+    # Rule: S3 ObjectCreated → processing Lambda (monolith: L2 target OK)
+    events.Rule(
+        self, "S3ObjectCreatedRule",
+        event_bus=events.EventBus.from_event_bus_name(self, "DefaultBus", "default"),
+        event_pattern=events.EventPattern(
+            source=["aws.s3"],
+            detail_type=["Object Created"],
+            detail={"bucket": {"name": [{"prefix": "{project_name}-"}]}},
+        ),
+        targets=[targets.LambdaFunction(self.lambda_functions["DocumentUpload"])],
+    )
+
+    # Rule: SFN failure → SNS ops topic (L2 target OK in monolith)
+    events.Rule(
+        self, "SFNFailedRule",
+        event_pattern=events.EventPattern(
+            source=["aws.states"],
+            detail_type=["Step Functions Execution Status Change"],
+            detail={"status": ["FAILED", "TIMED_OUT", "ABORTED"]},
+        ),
+        targets=[targets.SnsTopic(self.ops_topic)],
     )
 ```
 
----
-
-## PATTERN D: Kinesis Data Streams + Firehose
-
-Use for **high-throughput event streaming** (>1,000 events/sec) or real-time analytics pipelines.
+### 4.3 SQS FIFO for ordered per-entity processing
 
 ```python
-def _create_kinesis_streams(self, stage_name: str) -> None:
-    """
-    Kinesis Data Streams for high-throughput event ingestion.
+self.order_fifo = sqs.Queue(
+    self, "OrderFifoQueue",
+    queue_name=f"{{project_name}}-order.fifo",
+    fifo=True,
+    content_based_deduplication=True,
+    encryption_master_key=self.kms_key,
+    visibility_timeout=Duration.seconds(120),
+)
+# Producer uses MessageGroupId="order#<order_id>" to preserve per-order order.
+```
 
-    Use cases:
-      - Clickstream / user activity tracking
-      - IoT sensor data
-      - Application metrics at scale
-      - Real-time fraud signals
+### 4.4 Kinesis Data Stream (high-throughput producers)
 
-    Flow:
-      Producers → Kinesis Data Stream → Lambda (real-time processing)
-                                      → Firehose → S3 (data lake)
-                                      → Firehose → OpenSearch (search/analytics)
-    """
+```python
+from aws_cdk import aws_kinesis as kinesis
 
-    # Kinesis Data Stream
-    # on-demand mode: auto-scales shards (simpler, slightly more expensive)
-    # provisioned mode: fixed shards (cheaper at predictable throughput)
-    self.event_stream = kinesis.Stream(
-        self, "EventStream",
-        stream_name=f"{{project_name}}-events-{stage_name}",
 
-        # On-demand (recommended unless you know your exact shard count)
-        stream_mode=kinesis.StreamMode.ON_DEMAND,
+self.telemetry_stream = kinesis.Stream(
+    self, "TelemetryStream",
+    stream_name=f"{{project_name}}-telemetry-{stage}",
+    stream_mode=kinesis.StreamMode.ON_DEMAND,
+    encryption=kinesis.StreamEncryption.KMS,
+    encryption_key=self.kms_key,
+    retention_period=Duration.hours(24),
+)
 
-        # For provisioned mode (uncomment and set shard count):
-        # stream_mode=kinesis.StreamMode.PROVISIONED,
-        # shard_count=2 if stage_name != "prod" else 10,
+from aws_cdk import aws_lambda_event_sources as les
 
-        # Data retention: 24hr default, up to 365 days
-        retention_period=Duration.hours(24) if stage_name == "dev" else Duration.days(7),
 
-        # Encryption
-        encryption=kinesis.StreamEncryption.KMS,
-        encryption_key=self.kms_key,
-
-        removal_policy=RemovalPolicy.DESTROY,
+self.lambda_functions["TelemetryProcessor"].add_event_source(
+    les.KinesisEventSource(
+        self.telemetry_stream,
+        starting_position=_lambda.StartingPosition.TRIM_HORIZON,
+        batch_size=100,
+        max_batching_window=Duration.seconds(5),
+        parallelization_factor=4,
+        bisect_batch_on_error=True,
+        retry_attempts=3,
+        on_failure=les.SqsDlq(self.fanout_dlq),
     )
+)
+```
 
-    # Lambda consumer of Kinesis stream
-    # [Claude: look up the correct Lambda from lambda_functions dict]
-    if "StreamProcessor" in self.lambda_functions:
-        self.lambda_functions["StreamProcessor"].add_event_source(
-            lambda_events.KinesisEventSource(
-                self.event_stream,
-                starting_position=_lambda.StartingPosition.TRIM_HORIZON,
-                batch_size=100,          # Up to 100 records per invocation
-                max_batching_window=Duration.seconds(5),
-                parallelization_factor=2,  # 2 concurrent Lambdas per shard
-                bisect_batch_on_error=True,  # On failure, split batch and retry half
-                report_batch_item_failures=True,
-                retry_attempts=3,
-                destination_config=_lambda.DestinationConfig(
-                    on_failure=destinations.SqsDestination(self.dlq),
-                ),
+### 4.5 Monolith gotchas
+
+- **SNS raw message delivery** (`raw_message_delivery=True`) strips the SNS envelope — consumer Lambda sees the original payload as `event["Records"][0]["body"]`. Without it, every consumer has to parse a wrapped JSON envelope.
+- **DLQ on rule targets** is a separate config from **DLQ on the Lambda event-source mapping**. You probably want both.
+- **SFN → EventBridge** event format differs between Standard and Express workflows. Express emits CloudWatch metrics, not EB events — if you need per-execution events on Express, invoke EB yourself from the state machine.
+
+---
+
+## 5. Micro-Stack Variant
+
+### 5.1 The four non-negotiables for cross-stack event wiring
+
+1. **Rule + target in different stacks → use L1 `events.CfnRule` with a raw `TargetProperty` dict.** L2 `events.Rule(targets=[targets.SqsQueue(q)])` auto-adds queue resource policy referencing the rule ARN — cycle.
+2. **Queues and topics add resource policies via static-ARN conditions, not by CDK auto-grant.** Use `aws:SourceArn: arn:aws:events:{region}:{account}:rule/default/*` (wildcard on rule) or `arn:aws:sns:{region}:{account}:topic-name` (explicit topic ARN).
+3. **Consumer Lambdas grant themselves SQS permissions via identity-side policy.** Never call `queue.grant_consume_messages(fn)` cross-stack.
+4. **S3 → EventBridge → SQS, never S3 → SQS direct** in a micro-stack architecture. S3 event notification to a queue in another stack works but has awkward bucket-policy auto-mutation. EventBridge gives archive + replay + filter for free and is the idiomatic path.
+
+### 5.2 `QueueStack` — queues that will receive events
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration, RemovalPolicy,
+    aws_sqs as sqs,
+    aws_kms as kms,
+    aws_iam as iam,
+)
+from constructs import Construct
+
+
+class QueueStack(cdk.Stack):
+    """SQS queues. Each has a DLQ. Resource policies are STATIC (no cross-stack Ref)."""
+
+    def __init__(
+        self,
+        scope: Construct,
+        audio_data_key: kms.IKey,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-queue", **kwargs)
+
+        def _make(name: str, fifo: bool = False, timeout_s: int = 180) -> tuple[sqs.Queue, sqs.Queue]:
+            dlq = sqs.Queue(
+                self, f"{name}Dlq",
+                queue_name=f"{{project_name}}-{name}-dlq{'.fifo' if fifo else ''}",
+                fifo=fifo or None,
+                encryption=sqs.QueueEncryption.KMS,
+                encryption_master_key=audio_data_key,
+                retention_period=Duration.days(14),
             )
-        )
+            q = sqs.Queue(
+                self, name.title().replace("-", "") + "Queue",
+                queue_name=f"{{project_name}}-{name}{'.fifo' if fifo else ''}",
+                fifo=fifo or None,
+                content_based_deduplication=fifo or None,
+                encryption=sqs.QueueEncryption.KMS,
+                encryption_master_key=audio_data_key,
+                visibility_timeout=Duration.seconds(timeout_s),
+                dead_letter_queue=sqs.DeadLetterQueue(max_receive_count=5, queue=dlq),
+            )
+            return q, dlq
 
-    # Kinesis Firehose → S3 data lake (raw event storage + Athena queryable)
-    firehose_role = iam.Role(
-        self, "FirehoseRole",
-        assumed_by=iam.ServicePrincipal("firehose.amazonaws.com"),
-    )
-    self.data_bucket.grant_read_write(firehose_role)
-    self.event_stream.grant_read(firehose_role)
-    self.kms_key.grant_encrypt_decrypt(firehose_role)
+        self.audio_ingest_queue,   self.audio_ingest_dlq   = _make("audio-ingest")
+        self.transcribe_request_q, self.transcribe_req_dlq = _make("transcribe-request")
+        self.bedrock_analysis_q,   self.bedrock_dlq        = _make("bedrock-analysis", fifo=True)
+        self.insight_store_q,      self.insight_store_dlq  = _make("insight-store")
+        self.notify_q,             self.notify_dlq         = _make("notify")
+        self.dlq_reprocess_q,      self.reprocess_parent_dlq = _make("dlq-reprocess")
 
-    self.firehose = firehose.CfnDeliveryStream(
-        self, "EventFirehose",
-        delivery_stream_name=f"{{project_name}}-event-firehose-{stage_name}",
-        delivery_stream_type="KinesisStreamAsSource",
+        # Allow EventBridge to SendMessage to ingest queue, scoped to THIS account's
+        # default bus rules (static-ARN condition, no cross-stack Ref).
+        self.audio_ingest_queue.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowEventBridgeRulesToSend",
+            actions=["sqs:SendMessage"],
+            principals=[iam.ServicePrincipal("events.amazonaws.com")],
+            resources=[self.audio_ingest_queue.queue_arn],
+            conditions={
+                "ArnLike": {
+                    "aws:SourceArn": f"arn:aws:events:{self.region}:{self.account}:rule/default/*"
+                }
+            },
+        ))
 
-        kinesis_stream_source_configuration=firehose.CfnDeliveryStream.KinesisStreamSourceConfigurationProperty(
-            kinesis_stream_arn=self.event_stream.stream_arn,
-            role_arn=firehose_role.role_arn,
-        ),
-
-        extended_s3_destination_configuration=firehose.CfnDeliveryStream.ExtendedS3DestinationConfigurationProperty(
-            bucket_arn=self.data_bucket.bucket_arn,
-            role_arn=firehose_role.role_arn,
-
-            # Partition by date for efficient Athena queries
-            prefix="events/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/",
-            error_output_prefix="events-errors/!{firehose:error-output-type}/",
-
-            # Buffer before writing to S3 (reduce S3 API calls)
-            buffering_hints=firehose.CfnDeliveryStream.BufferingHintsProperty(
-                interval_in_seconds=60,   # Write every 60 seconds
-                size_in_m_bs=5,          # OR when buffer hits 5MB
-            ),
-
-            # Compression (reduces S3 storage and Athena scan cost)
-            compression_format="GZIP",
-
-            # Encryption
-            encryption_configuration=firehose.CfnDeliveryStream.EncryptionConfigurationProperty(
-                kms_encryption_config=firehose.CfnDeliveryStream.KMSEncryptionConfigProperty(
-                    awskms_key_arn=self.kms_key.key_arn,
-                )
-            ),
-        ),
-    )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "KinesisStreamName",
-        value=self.event_stream.stream_name,
-        description="Kinesis Data Stream name",
-        export_name=f"{{project_name}}-kinesis-stream-{stage_name}",
-    )
-    CfnOutput(self, "KinesisStreamArn",
-        value=self.event_stream.stream_arn,
-        description="Kinesis Data Stream ARN (for producers)",
-        export_name=f"{{project_name}}-kinesis-arn-{stage_name}",
-    )
-
+        cdk.CfnOutput(self, "AudioIngestQueueUrl",  value=self.audio_ingest_queue.queue_url)
+        cdk.CfnOutput(self, "AudioIngestQueueArn",  value=self.audio_ingest_queue.queue_arn)
 ```
 
----
-
-## PATTERN E: DynamoDB Streams → Lambda (Change Data Capture)
-
-Trigger Lambda on every DynamoDB item INSERT/MODIFY/REMOVE.
+### 5.3 `EventStack` — custom bus + rules using L1 CfnRule for cross-stack targets
 
 ```python
-# After creating a DynamoDB table with stream enabled:
-# stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    aws_events as events,
+    aws_sqs as sqs,
+)
+from constructs import Construct
 
-# Attach Lambda trigger to DynamoDB stream
-if "DdbStreamProcessor" in self.lambda_functions:
-    self.lambda_functions["DdbStreamProcessor"].add_event_source(
-        lambda_events.DynamoEventSource(
-            self.ddb_tables["MainTable"],
-            starting_position=_lambda.StartingPosition.LATEST,
-            batch_size=100,
-            max_batching_window=Duration.seconds(5),
-            bisect_batch_on_error=True,
-            report_batch_item_failures=True,
-            retry_attempts=3,
-            # Filter: only process INSERT and MODIFY, skip REMOVE
-            filters=[
-                _lambda.FilterCriteria.filter({
-                    "eventName": _lambda.FilterRule.or_filter(
-                        _lambda.FilterRule.is_equal("INSERT"),
-                        _lambda.FilterRule.is_equal("MODIFY"),
-                    )
-                })
+
+class EventStack(cdk.Stack):
+    """EventBridge custom bus + archive + rules.
+
+    For cross-stack targets (queues in QueueStack), we use L1 CfnRule with a
+    raw target dict to avoid L2 targets.SqsQueue auto-grant which injects a
+    queue resource policy referencing the rule ARN -- creating a circular
+    cross-stack export. Permissions are granted via static-ARN policies
+    attached in QueueStack.
+    """
+
+    def __init__(
+        self,
+        scope: Construct,
+        audio_ingest_queue: sqs.IQueue,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-event", **kwargs)
+
+        # Custom bus
+        self.bus = events.EventBus(
+            self, "DomainBus",
+            event_bus_name=f"{{project_name}}-domain-bus",
+        )
+
+        # Archive on the custom bus (enables event replay)
+        self.bus.archive(
+            "DomainArchive",
+            archive_name=f"{{project_name}}-domain-archive",
+            retention=Duration.days(30),
+            event_pattern=events.EventPattern(source=events.Match.prefix("")),
+        )
+
+        # Rule: S3 ObjectCreated on default bus -> audio_ingest_queue (cross-stack)
+        # L1 CfnRule skips the L2 auto-grant that would create a cycle.
+        events.CfnRule(
+            self, "S3ObjectCreatedRule",
+            event_bus_name="default",
+            state="ENABLED",
+            event_pattern={
+                "source": ["aws.s3"],
+                "detail-type": ["Object Created"],
+                "detail": {"bucket": {"name": [{"prefix": "{project_name}-"}]}},
+            },
+            targets=[
+                events.CfnRule.TargetProperty(
+                    arn=audio_ingest_queue.queue_arn,
+                    id="IngestQueueTarget",
+                )
             ],
         )
-    )
+
+        # Rule: Transcribe Job State Change -> CloudWatch Logs (same-stack L2 OK)
+        log_group_rule = events.Rule(
+            self, "TranscribeJobStateRule",
+            event_bus=events.EventBus.from_event_bus_name(self, "DefaultBus", "default"),
+            event_pattern=events.EventPattern(
+                source=["aws.transcribe"],
+                detail_type=["Transcribe Job State Change"],
+                detail={"TranscriptionJobStatus": ["COMPLETED", "FAILED"]},
+            ),
+        )
+        # Target in same stack (the bus itself) -> L2 OK
+        from aws_cdk import aws_events_targets as targets_
+        log_group_rule.add_target(targets_.EventBus(self.bus))
+
+        cdk.CfnOutput(self, "DomainBusName", value=self.bus.event_bus_name)
+        cdk.CfnOutput(self, "DomainBusArn",  value=self.bus.event_bus_arn)
+```
+
+### 5.4 Consumer `ComputeStack` — identity-side SQS grants
+
+See `LAYER_BACKEND_LAMBDA.md` §4.2 for the full ComputeStack pattern. Key excerpts:
+
+```python
+# Attach SQS event source WITHOUT L2 grant_consume_messages. Use identity policy.
+from aws_cdk import aws_lambda_event_sources as les
+
+
+def _sqs_grant(fn, queue, actions):
+    fn.add_to_role_policy(iam.PolicyStatement(actions=actions, resources=[queue.queue_arn]))
+
+
+_sqs_grant(self.router_fn, audio_ingest_queue, [
+    "sqs:ReceiveMessage", "sqs:DeleteMessage",
+    "sqs:GetQueueAttributes", "sqs:ChangeMessageVisibility",
+])
+
+# Event source mapping itself is OK cross-stack (no policy mutation).
+self.router_fn.add_event_source(les.SqsEventSource(
+    audio_ingest_queue,
+    batch_size=10,
+    max_batching_window=Duration.seconds(5),
+    report_batch_item_failures=True,
+))
+```
+
+### 5.5 Micro-stack gotchas
+
+- **`CfnRule.TargetProperty`** field names use CFN camelCase underneath but CDK exposes snake_case Python — always check with `cdk synth` → inspect `cdk.out/<stack>.template.json` when in doubt.
+- **Kinesis** is less common in micro-stack splits because consumers usually want the stream's ARN for event-source mapping *and* for its KMS key decrypt. If you split, keep the consumer Lambda in the same stack as the stream — or do KMS decrypt identity-side per `LAYER_BACKEND_LAMBDA.md`.
+- **SNS cross-region** fan-out: use FIFO topics only when ordering matters; FIFO is single-region.
+
+---
+
+## 6. DLQ + redrive pattern (both variants)
+
+```python
+# On consumer Lambda: add an OnFailure destination so partial batch failures
+# that drain past maxReceiveCount land in the DLQ with context.
+from aws_cdk import aws_lambda_destinations as dest
+
+
+self.router_fn.configure_async_invoke(
+    on_failure=dest.SqsDestination(self.dlq_reprocess_q),
+    retry_attempts=2,
+    max_event_age=Duration.hours(6),
+)
+
+# Reprocessor Lambda pulls from DLQ, inspects, requeues valid items.
+# See backend/lambdas/dlq_reprocessor/handler.py for reference.
 ```
 
 ---
 
-## PATTERN F: S3 Event Notifications → Processing Pipeline
-
-Trigger Lambda or push to EventBridge/SQS when files arrive in S3.
+## 7. Worked example — synth both variants
 
 ```python
-# Option A: S3 → Lambda directly (simple, tight coupling)
-self.data_bucket.add_event_notification(
-    s3.EventType.OBJECT_CREATED,
-    s3_notifications.LambdaDestination(self.lambda_functions["FileProcessor"]),
-    s3.NotificationKeyFilter(prefix="uploads/", suffix=".pdf"),
-)
+"""Verify monolith and micro-stack event wiring both compile."""
+import aws_cdk as cdk
+from aws_cdk import aws_kms as kms
+from aws_cdk.assertions import Template
 
-# Option B: S3 → EventBridge → Multiple targets (recommended for decoupling)
-# (requires event_bridge_enabled=True on the bucket — set in LAYER_DATA.md)
-# EventBridge rule:
-events.Rule(
-    self, "S3UploadRule",
-    event_bus=events.EventBus.from_event_bus_name(self, "DefaultBus", "default"),
-    event_pattern=events.EventPattern(
-        source=["aws.s3"],
-        detail_type=["Object Created"],
-        detail={
-            "bucket": {"name": [self.data_bucket.bucket_name]},
-            "object": {"key": [{"prefix": "uploads/"}]},
-        },
-    ),
-    targets=[
-        targets.LambdaFunction(self.lambda_functions["VirusScanner"]),
-        targets.SqsQueue(self.main_queue),  # Also enqueue for async processing
-    ],
-)
 
-# Option C: S3 → SQS (for reliable at-least-once processing with DLQ)
-self.data_bucket.add_event_notification(
-    s3.EventType.OBJECT_CREATED,
-    s3_notifications.SqsDestination(self.main_queue),
-    s3.NotificationKeyFilter(prefix="uploads/"),
-)
+def test_micro_stack_event_wiring_has_no_cycles():
+    app = cdk.App()
+    env = cdk.Environment(account="000000000000", region="us-east-1")
+
+    from infrastructure.cdk.stacks.queue_stack import QueueStack
+    from infrastructure.cdk.stacks.event_stack import EventStack
+
+    sec = cdk.Stack(app, "Sec", env=env)
+    key = kms.Key(sec, "AudioDataKey")
+
+    queues = QueueStack(app, audio_data_key=key, env=env)
+    events_stack = EventStack(app, audio_ingest_queue=queues.audio_ingest_queue, env=env)
+
+    # If a cycle existed, this would raise during synth.
+    Template.from_stack(queues)
+    Template.from_stack(events_stack)
 ```
+
+---
+
+## 8. References
+
+- `docs/template_params.md` — `EB_CUSTOM_BUS_NAME`, `SQS_DLQ_MAX_RECEIVE_COUNT`, `SQS_VISIBILITY_TIMEOUT_MULTIPLIER`
+- `docs/Feature_Roadmap.md` — features M-01..M-14, E-01..E-11
+- AWS docs: [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/), [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/), [Kinesis](https://docs.aws.amazon.com/streams/latest/dev/introduction.html)
+- Related SOPs: `LAYER_BACKEND_LAMBDA` (consumers), `LAYER_DATA` (downstream persistence), `LAYER_SECURITY` (KMS key policies)
+
+---
+
+## 9. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP rewrite. Micro-Stack variant uses L1 `CfnRule` + static-ARN queue policies to prevent cross-stack circular exports. Codified the four non-negotiables (§5.1). Added QueueStack / EventStack worked examples. |
+| 1.0 | 2026-03-05 | Initial partial with L2 `targets.SqsQueue`, implicit auto-grants. |

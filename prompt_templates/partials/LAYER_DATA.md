@@ -1,397 +1,427 @@
-# PARTIAL: Data Layer CDK Constructs
+# SOP — Data Layer (S3, RDS / Aurora, DynamoDB, Secrets Manager)
 
-**Usage:** Referenced by `02A_APP_STACK_GENERATOR.md` for the `_create_data_layer()` method body.
-
----
-
-## When to Include Each Data Construct
-
-| SOW Signal                                  | Include              |
-| ------------------------------------------- | -------------------- |
-| "SQL", "relational", "transactions", "ACID" | Aurora Serverless V2 |
-| "NoSQL", "key-value", "session", "metadata" | DynamoDB             |
-| "cache", "low latency", "session store"     | ElastiCache Valkey Serverless (or Redis OSS) |
-| "search", "full-text", "faceted search"     | OpenSearch Service   |
-| "data lake", "analytics", "Athena", "Glue"  | S3 + Glue + Athena   |
-| "message queue", "async", "decouple"        | SQS                  |
-| "event streaming", "Kinesis"                | Kinesis Data Streams |
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
 
-## CDK Code Block — Data Layer
+## 1. Purpose
+
+Persistent data stores:
+
+- **S3 buckets** — object storage (raw data, artifacts, access logs, static sites)
+- **RDS / Aurora** — relational DB (PostgreSQL 15 default, Aurora Serverless v2 swap-in)
+- **DynamoDB** — key-value + job state (low-latency, streams-enabled)
+- **Secrets Manager** — DB credentials, API keys (not flat env vars)
+- **Lifecycle rules, PITR, backups** — retention + recovery
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| DB + buckets + consumer workloads all in one stack | **§3 Monolith Variant** |
+| Separate `DatabaseStack`, `StorageStack`, `JobLedgerStack` consumed by `ComputeStack` | **§4 Micro-Stack Variant** |
+
+**Why the split matters.** Every `bucket.grant_*(role)` and `table.grant_*(role)` across stacks auto-modifies the bucket policy / table encryption-key policy with the consumer role ARN. Micro-Stack variant uses identity-side grants throughout (see `LAYER_SECURITY` §4.2).
+
+---
+
+## 3. Monolith Variant
+
+### 3.1 S3 buckets
 
 ```python
-def _create_data_layer(self, stage_name: str) -> None:
-    """
-    Layer 2: Data Infrastructure
+import aws_cdk as cdk
+from aws_cdk import RemovalPolicy, Duration, aws_s3 as s3
 
-    Components (include based on Architecture Map):
-      A) Aurora Serverless V2 (PostgreSQL)  — relational/SQL data
-      B) DynamoDB Tables                    — NoSQL/fast lookup data
-      C) ElastiCache Valkey/Redis          — caching/sessions
-      D) S3 Data Bucket                     — file storage / data lake
-      E) SQS Queues                         — async message passing
 
-    All data stores are:
-      - Encrypted at rest (KMS)
-      - Encrypted in transit (TLS)
-      - PITR / backup enabled
-      - In isolated subnets (no public access)
-    """
-
-    # =========================================================================
-    # A) AURORA SERVERLESS V2 (PostgreSQL)
-    # Remove if no relational DB detected in Architecture Map
-    # =========================================================================
-
-    # Security group for Aurora — only allow Lambda/ECS to connect
-    self.aurora_sg = ec2.SecurityGroup(
-        self, "AuroraSG",
-        vpc=self.vpc,
-        description="Security group for Aurora cluster",
-        allow_all_outbound=False,  # Least privilege
-    )
-
-    # Database credentials stored in Secrets Manager (never hardcoded)
-    self.db_secret = sm.Secret(
-        self, "AuroraSecret",
-        secret_name=f"/{{project_name}}/{stage_name}/aurora/credentials",
-        description="Aurora PostgreSQL master credentials",
-        generate_secret_string=sm.SecretStringGenerator(
-            secret_string_template='{"username": "postgres"}',
-            generate_string_key="password",
-            exclude_characters="\"@/\\ '",
-            password_length=32,
-        ),
-    )
-
-    # Aurora Serverless V2 cluster
-    # ACU ranges scale per environment
-    aurora_min_acu, aurora_max_acu = {
-        "dev":     (0.5, 1.0),   # Scale to zero when idle
-        "staging": (0.5, 4.0),
-        "prod":    (1.0, 16.0),  # Always-on minimum
-    }.get(stage_name, (0.5, 1.0))
-
-    self.aurora_cluster = rds.DatabaseCluster(
-        self, "AuroraCluster",
-        cluster_identifier=f"{{project_name}}-{stage_name}",
-
-        engine=rds.DatabaseClusterEngine.aurora_postgresql(
-            version=rds.AuroraPostgresEngineVersion.VER_16_6,
-        ),
-
-        # Serverless V2 writer instance
-        writer=rds.ClusterInstance.serverless_v2(
-            "Writer",
-            scale_with_writer=True,
-        ),
-
-        # Add reader in prod for read scaling
-        readers=[
-            rds.ClusterInstance.serverless_v2(
-                "Reader",
-                scale_with_writer=True,
-            )
-        ] if stage_name == "prod" else [],
-
-        serverless_v2_min_capacity=aurora_min_acu,
-        serverless_v2_max_capacity=aurora_max_acu,
-
-        # Networking: isolated subnets (NO internet access)
-        vpc=self.vpc,
-        vpc_subnets=ec2.SubnetSelection(
-            subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
-        ),
-        security_groups=[self.aurora_sg],
-
-        # Authentication
-        credentials=rds.Credentials.from_secret(self.db_secret),
-
-        # Security
-        storage_encrypted=True,
-        storage_encryption_key=self.kms_key,
-
-        # Availability (multi-AZ in prod)
-        availability_zones=self.availability_zones[:2] if stage_name != "prod" else self.availability_zones[:3],
-
-        # Backup & Recovery
-        backup=rds.BackupProps(
-            retention=Duration.days(7) if stage_name != "prod" else Duration.days(35),
-            preferred_window="03:00-04:00",
-        ),
-
-        # Auto-pause (dev only — save costs)
-        # Note: Serverless V2 doesn't have pause — use min 0 ACU for similar effect
-
-        # Protection
-        deletion_protection=stage_name == "prod",
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.SNAPSHOT,
-
-        # Parameter group for optimization
-        parameter_group=rds.ParameterGroup.from_parameter_group_name(
-            self, "AuroraParams",
-            parameter_group_name="default.aurora-postgresql16",
-        ),
-
-        # Enhanced monitoring
-        monitoring_interval=Duration.seconds(60),
-        monitoring_role=iam.Role(
-            self, "AuroraMonitoringRole",
-            assumed_by=iam.ServicePrincipal("monitoring.rds.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonRDSEnhancedMonitoringRole")
-            ],
-        ),
-
-        # CloudWatch logs
-        cloudwatch_logs_exports=["postgresql"],
-        cloudwatch_logs_retention=logs.RetentionDays.ONE_MONTH,
-    )
-
-    # =========================================================================
-    # B) DYNAMODB TABLES
-    # Define one entry per detected data entity from Architecture Map Section 5
-    # =========================================================================
-
-    # Master configuration for all DynamoDB tables
-    # [Claude: Replace with actual tables from Architecture Map Section 5]
-    DYNAMODB_TABLES = [
-        {
-            "id": "MainTable",
-            "table_name": f"{{project_name}}-main-{stage_name}",
-            "pk": "pk",
-            "sk": "sk",
-            "gsi": [
-                # GSI for query by email
-                {"name": "GSI1", "pk": "gsi1pk", "sk": "gsi1sk"},
-            ],
-            "ttl_attribute": "ttl",  # Set to None if no TTL needed
-            "stream": ddb.StreamViewType.NEW_AND_OLD_IMAGES,  # For DynamoDB Streams
-        },
-        # Add more tables from Architecture Map Section 5 here
-    ]
-
-    self.ddb_tables: Dict[str, ddb.Table] = {}
-
-    for table_config in DYNAMODB_TABLES:
-        table = ddb.Table(
-            self, table_config["id"],
-            table_name=table_config["table_name"],
-
-            # Key schema
-            partition_key=ddb.Attribute(name=table_config["pk"], type=ddb.AttributeType.STRING),
-            sort_key=ddb.Attribute(name=table_config["sk"], type=ddb.AttributeType.STRING) if table_config.get("sk") else None,
-
-            # Billing: on-demand (dev/staging), provisioned (prod)
-            billing_mode=ddb.BillingMode.PAY_PER_REQUEST if stage_name != "prod" else ddb.BillingMode.PROVISIONED,
-
-            # Provisioned capacity (prod only)
-            read_capacity=5 if stage_name == "prod" else None,
-            write_capacity=5 if stage_name == "prod" else None,
-
-            # Auto-scaling (prod only)
-            # [Apply via table.auto_scale_read_capacity() after creation]
-
-            # Encryption at rest
-            encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
-            encryption_key=self.kms_key,
-
-            # Point-in-time recovery
-            point_in_time_recovery=True,
-
-            # Streams (for event-driven patterns)
-            stream=table_config.get("stream"),
-
-            # TTL (for auto-expiring records)
-            time_to_live_attribute=table_config.get("ttl_attribute"),
-
-            # Protection
-            removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
-        )
-
-        # Add Global Secondary Indexes
-        for gsi in table_config.get("gsi", []):
-            table.add_global_secondary_index(
-                index_name=gsi["name"],
-                partition_key=ddb.Attribute(name=gsi["pk"], type=ddb.AttributeType.STRING),
-                sort_key=ddb.Attribute(name=gsi["sk"], type=ddb.AttributeType.STRING) if gsi.get("sk") else None,
-            )
-
-        # Auto-scaling for prod
-        if stage_name == "prod":
-            read_scaling = table.auto_scale_read_capacity(min_capacity=5, max_capacity=100)
-            read_scaling.scale_on_utilization(target_utilization_percent=70)
-            write_scaling = table.auto_scale_write_capacity(min_capacity=5, max_capacity=100)
-            write_scaling.scale_on_utilization(target_utilization_percent=70)
-
-        self.ddb_tables[table_config["id"]] = table
-
-    # =========================================================================
-    # C) ELASTICACHE (Valkey Serverless or Redis OSS)
-    # AWS recommends Valkey (Redis-compatible fork) as the default engine.
-    # ElastiCache Serverless auto-scales and requires no node management.
-    # Include if caching/sessions detected in Architecture Map L2
-    # =========================================================================
-
-    self.redis_sg = ec2.SecurityGroup(
-        self, "RedisSG",
-        vpc=self.vpc,
-        description="Security group for ElastiCache",
-        allow_all_outbound=False,
-    )
-
-    # Option A: ElastiCache Serverless (recommended — auto-scales, no node management)
-    # self.cache = elasticache.CfnServerlessCache(
-    #     self, "CacheServerless",
-    #     serverless_cache_name=f"{{project_name}}-cache-{stage_name}",
-    #     engine="valkey",  # or "redis" for Redis OSS compatibility
-    #     security_group_ids=[self.redis_sg.security_group_id],
-    #     subnet_ids=[subnet.subnet_id for subnet in self.vpc.isolated_subnets],
-    # )
-
-    # Option B: ElastiCache Replication Group (node-based, more control)
-    redis_subnet_group = elasticache.CfnSubnetGroup(
-        self, "RedisSubnetGroup",
-        description="Subnet group for ElastiCache",
-        subnet_ids=[subnet.subnet_id for subnet in self.vpc.isolated_subnets],
-    )
-
-    self.redis_cluster = elasticache.CfnReplicationGroup(
-        self, "Redis",
-        replication_group_description=f"{{project_name}} cache {stage_name}",
-
-        # Engine: Valkey (recommended) or Redis OSS
-        engine="valkey",  # [Claude: use "redis" if SOW specifically requires Redis OSS]
-        engine_version="8.0",
-        cache_node_type="cache.t4g.micro" if stage_name == "dev" else "cache.r7g.large",
-
-        # Cluster configuration
-        num_cache_clusters=1 if stage_name == "dev" else 2,  # Multi-AZ in prod/staging
-
-        # Networking
-        cache_subnet_group_name=redis_subnet_group.ref,
-        security_group_ids=[self.redis_sg.security_group_id],
-
-        # Security
-        at_rest_encryption_enabled=True,
-        transit_encryption_enabled=True,
-
-        # Auth token (in Secrets Manager)
-        # auth_token=self.redis_auth_token.secret_value.to_string(),
-
-        # Backups
-        snapshot_retention_limit=1 if stage_name != "prod" else 7,
-        snapshot_window="04:00-05:00",
-
-        # Auto-failover (prod only)
-        automatic_failover_enabled=stage_name == "prod",
-        multi_az_enabled=stage_name == "prod",
-    )
-
-    # =========================================================================
-    # D) S3 DATA BUCKET (for file uploads, exports, data lake)
-    # =========================================================================
-
-    self.data_bucket = s3.Bucket(
-        self, "DataBucket",
-        bucket_name=f"{{project_name}}-data-{stage_name}-{self.account}",
-
-        # Security
-        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+def _create_s3(self, stage: str) -> None:
+    common = dict(
         encryption=s3.BucketEncryption.KMS,
-        encryption_key=self.kms_key,
-
-        # Versioning
+        encryption_key=self.audio_data_key,
+        enforce_ssl=True,
+        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
         versioned=True,
-
-        # Lifecycle rules for cost optimization
-        lifecycle_rules=[
-            s3.LifecycleRule(
-                id="MoveToIA",
-                enabled=True,
-                transitions=[
-                    s3.Transition(
-                        storage_class=s3.StorageClass.INFREQUENT_ACCESS,
-                        transition_after=Duration.days(30),
-                    ),
-                    s3.Transition(
-                        storage_class=s3.StorageClass.GLACIER,
-                        transition_after=Duration.days(90),
-                    ),
-                ],
-                expiration=Duration.days(365 * 7) if stage_name == "prod" else Duration.days(90),
-            ),
-        ],
-
-        # Event notifications for processing triggers
-        event_bridge_enabled=True,
-
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
-        auto_delete_objects=stage_name != "prod",
+        removal_policy=RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY,
+        auto_delete_objects=stage != "prod",
     )
-
-    # =========================================================================
-    # E) SQS QUEUES (for async processing)
-    # =========================================================================
-
-    # Dead Letter Queue (for failed messages)
-    self.dlq = sqs.Queue(
-        self, "DLQ",
-        queue_name=f"{{project_name}}-dlq-{stage_name}",
-        encryption=sqs.QueueEncryption.KMS,
-        encryption_master_key=self.kms_key,
-        retention_period=Duration.days(14),
-        removal_policy=RemovalPolicy.DESTROY,
+    self.audio_bucket = s3.Bucket(
+        self, "AudioBucket",
+        bucket_name=f"{{project_name}}-audio-{stage}",
+        event_bridge_enabled=True,     # → EventBridge for upload events
+        lifecycle_rules=[s3.LifecycleRule(
+            transitions=[s3.Transition(
+                storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                transition_after=Duration.days(90),
+            )],
+        )],
+        **common,
     )
-
-    # Main processing queue
-    self.main_queue = sqs.Queue(
-        self, "MainQueue",
-        queue_name=f"{{project_name}}-queue-{stage_name}",
-        encryption=sqs.QueueEncryption.KMS,
-        encryption_master_key=self.kms_key,
-
-        # Visibility timeout: must be >= Lambda/ECS processing time
-        visibility_timeout=Duration.seconds(300),
-
-        # Retention
-        retention_period=Duration.days(4),
-
-        # Dead letter queue configuration
-        dead_letter_queue=sqs.DeadLetterQueue(
-            max_receive_count=3,  # Retry 3x before DLQ
-            queue=self.dlq,
-        ),
-
-        removal_policy=RemovalPolicy.DESTROY,
+    self.transcript_bucket = s3.Bucket(
+        self, "TranscriptBucket",
+        bucket_name=f"{{project_name}}-transcripts-{stage}",
+        lifecycle_rules=[s3.LifecycleRule(expiration=Duration.days(365))],
+        **common,
     )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-
-    CfnOutput(self, "AuroraEndpoint",
-        value=self.aurora_cluster.cluster_endpoint.socket_address,
-        description="Aurora cluster endpoint",
-        export_name=f"{{project_name}}-aurora-endpoint-{stage_name}",
+    self.reports_bucket = s3.Bucket(
+        self, "ReportsBucket",
+        bucket_name=f"{{project_name}}-reports-{stage}",
+        lifecycle_rules=[s3.LifecycleRule(
+            transitions=[s3.Transition(
+                storage_class=s3.StorageClass.INFREQUENT_ACCESS,
+                transition_after=Duration.days(30),
+            )],
+        )],
+        **common,
     )
-
-    CfnOutput(self, "AuroraSecretArn",
-        value=self.db_secret.secret_arn,
-        description="Aurora credentials secret ARN",
-        export_name=f"{{project_name}}-aurora-secret-{stage_name}",
-    )
-
-    CfnOutput(self, "DataBucketName",
-        value=self.data_bucket.bucket_name,
-        description="S3 data bucket name",
-        export_name=f"{{project_name}}-data-bucket-{stage_name}",
-    )
-
-    CfnOutput(self, "MainQueueUrl",
-        value=self.main_queue.queue_url,
-        description="Main SQS queue URL",
-        export_name=f"{{project_name}}-queue-url-{stage_name}",
+    self.access_logs_bucket = s3.Bucket(
+        self, "AccessLogsBucket",
+        bucket_name=f"{{project_name}}-access-logs-{stage}",
+        encryption=s3.BucketEncryption.S3_MANAGED,  # log buckets typically use SSE-S3
+        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+        lifecycle_rules=[s3.LifecycleRule(expiration=Duration.days(90))],
+        removal_policy=common["removal_policy"],
+        auto_delete_objects=common["auto_delete_objects"],
     )
 ```
+
+### 3.2 RDS PostgreSQL
+
+```python
+from aws_cdk import aws_rds as rds, aws_ec2 as ec2, aws_secretsmanager as sm
+
+
+self.db_secret = rds.DatabaseSecret(
+    self, "DbSecret",
+    secret_name=f"{{project_name}}-db-{stage}",
+    username="app_admin",
+)
+
+self.rds_instance = rds.DatabaseInstance(
+    self, "Rds",
+    instance_identifier=f"{{project_name}}-rds-{stage}",
+    engine=rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_15),
+    instance_type=ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
+    vpc=self.vpc,
+    vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+    security_groups=[self.rds_sg],
+    credentials=rds.Credentials.from_secret(self.db_secret),
+    allocated_storage=50,
+    storage_encrypted=True,
+    storage_encryption_key=self.job_metadata_key,
+    database_name="app",
+    backup_retention=Duration.days(7 if stage == "prod" else 0),
+    multi_az=(stage == "prod"),
+    removal_policy=RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY,
+    deletion_protection=(stage == "prod"),
+    iam_authentication=True,
+)
+```
+
+### 3.3 DynamoDB
+
+```python
+from aws_cdk import aws_dynamodb as ddb
+
+
+self.ddb_tables = {}
+self.ddb_tables["jobs_ledger"] = ddb.Table(
+    self, "JobsLedger",
+    table_name=f"{{project_name}}-jobs-ledger-{stage}",
+    partition_key=ddb.Attribute(name="job_id",   type=ddb.AttributeType.STRING),
+    sort_key=ddb.Attribute(     name="stage_ts", type=ddb.AttributeType.STRING),
+    billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+    encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
+    encryption_key=self.job_metadata_key,
+    time_to_live_attribute="ttl",
+    stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
+    point_in_time_recovery=(stage == "prod"),
+    removal_policy=RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY,
+)
+self.ddb_tables["jobs_ledger"].add_global_secondary_index(
+    index_name="by-user",
+    partition_key=ddb.Attribute(name="user_id",    type=ddb.AttributeType.STRING),
+    sort_key=ddb.Attribute(     name="created_at", type=ddb.AttributeType.STRING),
+    projection_type=ddb.ProjectionType.ALL,
+)
+self.ddb_tables["jobs_ledger"].add_global_secondary_index(
+    index_name="by-status",
+    partition_key=ddb.Attribute(name="status",     type=ddb.AttributeType.STRING),
+    sort_key=ddb.Attribute(     name="updated_at", type=ddb.AttributeType.STRING),
+    projection_type=ddb.ProjectionType.KEYS_ONLY,
+)
+
+self.ddb_tables["audit_log"] = ddb.Table(
+    self, "AuditLog",
+    table_name=f"{{project_name}}-audit-log-{stage}",
+    partition_key=ddb.Attribute(name="event_id", type=ddb.AttributeType.STRING),
+    billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+    encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
+    encryption_key=self.job_metadata_key,
+    point_in_time_recovery=True,  # immutable-ish audit trail
+)
+```
+
+### 3.4 Monolith gotchas
+
+- `event_bridge_enabled=True` is implemented by CDK as a **custom resource** (`Custom::S3BucketNotifications`) — not by a property on the `AWS::S3::Bucket` itself. Test assertions that look at the bucket's `NotificationConfiguration` property will miss it.
+- RDS in `PRIVATE_ISOLATED` requires the VPC to declare isolated subnets.
+- DDB `stream=NEW_AND_OLD_IMAGES` enables stream but the consumer Lambda event source is wired separately (in `LAYER_BACKEND_LAMBDA`).
+
+---
+
+## 4. Micro-Stack Variant
+
+### 4.1 `StorageStack`
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    RemovalPolicy, Duration,
+    aws_s3 as s3,
+    aws_kms as kms,
+)
+from constructs import Construct
+
+
+class StorageStack(cdk.Stack):
+    def __init__(self, scope: Construct, audio_data_key: kms.IKey, **kwargs) -> None:
+        super().__init__(scope, "{project_name}-storage", **kwargs)
+
+        common = dict(
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=audio_data_key,
+            enforce_ssl=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            versioned=True,
+            removal_policy=RemovalPolicy.DESTROY,  # POC; RETAIN in prod
+            auto_delete_objects=True,
+        )
+        self.audio_bucket = s3.Bucket(
+            self, "AudioBucket",
+            bucket_name="{project_name}-audio",
+            event_bridge_enabled=True,
+            lifecycle_rules=[s3.LifecycleRule(transitions=[s3.Transition(
+                storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                transition_after=Duration.days(90))])],
+            **common,
+        )
+        self.transcript_bucket = s3.Bucket(self, "TranscriptBucket",
+            bucket_name="{project_name}-transcripts",
+            lifecycle_rules=[s3.LifecycleRule(expiration=Duration.days(365))],
+            **common,
+        )
+        self.reports_bucket = s3.Bucket(self, "ReportsBucket",
+            bucket_name="{project_name}-reports",
+            lifecycle_rules=[s3.LifecycleRule(transitions=[s3.Transition(
+                storage_class=s3.StorageClass.INFREQUENT_ACCESS,
+                transition_after=Duration.days(30))])],
+            **common,
+        )
+        self.access_logs_bucket = s3.Bucket(self, "AccessLogsBucket",
+            bucket_name="{project_name}-access-logs",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            lifecycle_rules=[s3.LifecycleRule(expiration=Duration.days(90))],
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+
+        for out in [
+            ("AudioBucketName",       self.audio_bucket.bucket_name),
+            ("TranscriptBucketName",  self.transcript_bucket.bucket_name),
+            ("ReportsBucketName",     self.reports_bucket.bucket_name),
+        ]:
+            cdk.CfnOutput(self, out[0], value=out[1])
+```
+
+### 4.2 `DatabaseStack`
+
+```python
+from aws_cdk import (
+    RemovalPolicy, Duration,
+    aws_rds as rds,
+    aws_ec2 as ec2,
+    aws_kms as kms,
+)
+
+
+class DatabaseStack(cdk.Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        vpc: ec2.IVpc,
+        rds_sg: ec2.ISecurityGroup,
+        job_metadata_key: kms.IKey,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-database", **kwargs)
+
+        self.db_secret = rds.DatabaseSecret(
+            self, "DbSecret",
+            secret_name="{project_name}-db",
+            username="app_admin",
+        )
+        self.rds = rds.DatabaseInstance(
+            self, "Rds",
+            engine=rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_15),
+            instance_type=ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+            security_groups=[rds_sg],
+            credentials=rds.Credentials.from_secret(self.db_secret),
+            allocated_storage=50,
+            storage_encrypted=True,
+            storage_encryption_key=job_metadata_key,
+            database_name="app",
+            backup_retention=Duration.days(0),        # POC; 7d+ in prod
+            multi_az=False,                            # POC
+            removal_policy=RemovalPolicy.DESTROY,
+            deletion_protection=False,
+            iam_authentication=True,
+        )
+
+        self.db_endpoint = self.rds.db_instance_endpoint_address
+
+        cdk.CfnOutput(self, "DbEndpoint",  value=self.db_endpoint)
+        cdk.CfnOutput(self, "DbSecretArn", value=self.db_secret.secret_arn)
+```
+
+### 4.3 `JobLedgerStack`
+
+```python
+from aws_cdk import (
+    RemovalPolicy,
+    aws_dynamodb as ddb,
+    aws_kms as kms,
+)
+
+
+class JobLedgerStack(cdk.Stack):
+    def __init__(self, scope: Construct, job_metadata_key: kms.IKey, **kwargs) -> None:
+        super().__init__(scope, "{project_name}-job-ledger", **kwargs)
+
+        self.jobs_ledger = ddb.Table(
+            self, "JobsLedger",
+            table_name="{project_name}-jobs-ledger",
+            partition_key=ddb.Attribute(name="job_id",   type=ddb.AttributeType.STRING),
+            sort_key=ddb.Attribute(     name="stage_ts", type=ddb.AttributeType.STRING),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=job_metadata_key,
+            time_to_live_attribute="ttl",
+            stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
+            point_in_time_recovery=False,  # POC; True in prod
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        self.jobs_ledger.add_global_secondary_index(
+            index_name="by-user",
+            partition_key=ddb.Attribute(name="user_id",    type=ddb.AttributeType.STRING),
+            sort_key=ddb.Attribute(     name="created_at", type=ddb.AttributeType.STRING),
+        )
+        self.jobs_ledger.add_global_secondary_index(
+            index_name="by-status",
+            partition_key=ddb.Attribute(name="status",     type=ddb.AttributeType.STRING),
+            sort_key=ddb.Attribute(     name="updated_at", type=ddb.AttributeType.STRING),
+            projection_type=ddb.ProjectionType.KEYS_ONLY,
+        )
+
+        self.audit_log = ddb.Table(
+            self, "AuditLog",
+            table_name="{project_name}-audit-log",
+            partition_key=ddb.Attribute(name="event_id", type=ddb.AttributeType.STRING),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=job_metadata_key,
+        )
+
+        cdk.CfnOutput(self, "JobsLedgerName", value=self.jobs_ledger.table_name)
+        cdk.CfnOutput(self, "AuditLogName",   value=self.audit_log.table_name)
+```
+
+### 4.4 Downstream consumer pattern (for reference, full code in `LAYER_BACKEND_LAMBDA`)
+
+```python
+# NEVER do this cross-stack:
+# self.jobs_ledger.grant_read_data(upload_fn)   # mutates JobLedgerStack → cycle
+# self.audio_bucket.grant_put(upload_fn)        # mutates StorageStack + SecurityStack KMS → cycle
+
+# ALWAYS do this instead — identity-side on consumer role:
+from aws_cdk import aws_iam as iam
+
+
+def _ddb_grant(fn, table, actions):
+    fn.add_to_role_policy(iam.PolicyStatement(
+        actions=actions,
+        resources=[table.table_arn, f"{table.table_arn}/index/*"],
+    ))
+
+
+def _s3_grant(fn, bucket, actions):
+    fn.add_to_role_policy(iam.PolicyStatement(
+        actions=actions, resources=[bucket.arn_for_objects("*")]
+    ))
+```
+
+### 4.5 Micro-stack gotchas
+
+- **`ddb.Table` + cross-stack encryption key** — `encryption_key=external_key` does NOT auto-mutate the key's policy in micro-stack mode (the key is referenced by ARN; DDB uses the *owner account's* IAM). This is safe.
+- **`rds.DatabaseInstance` + cross-stack KMS key** — same as DDB, safe. The KMS grant happens at *account-root* level implicitly.
+- **BUT** `bucket.encryption_key=external_key` + later `bucket.grant_read(role_in_another_stack)` still creates the cycle because `grant_read` propagates Decrypt to the external key.
+- **PITR on DDB**: enables a pointer-in-time recovery — free to turn on for small tables but costs per GB continuously after enablement.
+
+---
+
+## 5. Swap matrix
+
+| Trigger | Action |
+|---|---|
+| POC, no separate lifecycle for storage vs compute | Monolith |
+| Storage outlives compute (data retention policy) | Micro-Stack — StorageStack has `RemovalPolicy.RETAIN`; ComputeStack is disposable |
+| Need Aurora Serverless for variable load | Swap `rds.DatabaseInstance` → `rds.DatabaseCluster` with Serverless v2 config |
+| Need > 5-minute point-in-time rollback on DDB | `point_in_time_recovery=True` + adjust |
+
+---
+
+## 6. Worked example
+
+```python
+def test_job_ledger_stack_has_gsis():
+    import aws_cdk as cdk
+    from aws_cdk import aws_kms as kms
+    from aws_cdk.assertions import Template, Match
+    from infrastructure.cdk.stacks.job_ledger_stack import JobLedgerStack
+
+    app = cdk.App()
+    env = cdk.Environment(account="000000000000", region="us-east-1")
+    sec = cdk.Stack(app, "Sec", env=env)
+    key = kms.Key(sec, "MetaKey")
+
+    jls = JobLedgerStack(app, job_metadata_key=key, env=env)
+    t = Template.from_stack(jls)
+    t.has_resource_properties("AWS::DynamoDB::Table", {
+        "GlobalSecondaryIndexes": Match.array_with([
+            Match.object_like({"IndexName": "by-user"}),
+            Match.object_like({"IndexName": "by-status"}),
+        ])
+    })
+```
+
+---
+
+## 7. References
+
+- `docs/template_params.md` — `RDS_*`, `DDB_*`, `S3_*` lifecycle vars
+- `docs/Feature_Roadmap.md` — S-01..S-22, D-00..D-25, DY-01..DY-13
+- Related SOPs: `LAYER_SECURITY` (KMS), `LAYER_BACKEND_LAMBDA` (consumers + identity-side grant helpers)
+
+---
+
+## 8. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Explicit custom-resource note on `event_bridge_enabled`. Emphasis on cross-stack grant pattern for consumers. |
+| 1.0 | 2026-03-05 | Initial. |

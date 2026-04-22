@@ -1,309 +1,279 @@
-# PARTIAL: Frontend Layer CDK Constructs
+# SOP — Frontend Layer (S3 + CloudFront + OAC)
 
-**Usage:** Referenced by `02A_APP_STACK_GENERATOR.md` for the `_create_frontend()` method body.
-
----
-
-## When to Include This Layer
-
-Include frontend constructs when SOW contains ANY of:
-
-- "web application", "React", "Next.js", "Angular", "Vue", "SPA"
-- "website", "web UI", "web portal", "dashboard UI"
-- "static assets", "HTML/CSS/JS hosting"
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+) · React / Vite SPA build artifacts
 
 ---
 
-## CDK Code Block — Frontend Layer
+## 1. Purpose
+
+Host a React (or any static SPA) behind CloudFront with:
+
+- Origin Access Control (OAC) — the modern replacement for OAI
+- HTTPS only, TLS 1.2+, custom domain (optional)
+- SPA error-page rewrites (403/404 → `/index.html`)
+- Cache policies (long TTL for static, no-cache for HTML shell)
+- WAF + bot control (optional; see `SECURITY_WAF_SHIELD_MACIE`)
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+**THIS IS THE CANONICAL OAC CROSS-STACK CYCLE CASE.** Read §4 before splitting.
+
+| You are… | Use variant |
+|---|---|
+| S3 bucket + CloudFront distribution + BucketDeployment all in one stack | **§3 Monolith Variant** |
+| Separate `FrontendStack` (bucket) and `CdnStack` (distribution) in different CDK stacks | **§4 Micro-Stack Variant (ONE CORRECT WAY)** |
+
+**Why the split is a landmine.** `origins.S3BucketOrigin.with_origin_access_control(bucket, ...)` auto-grants `s3:GetObject` on the bucket's resource policy referencing the distribution's ARN. If bucket and distribution are in different stacks, this creates an immediate cross-stack circular export:
+
+- CdnStack needs `bucket.bucket_domain_name` (for origin)
+- BucketStack's policy needs `distribution.distribution_arn` (for OAC grant)
+
+**The fix is NOT** to try to break the cycle with manual policies. **The fix IS** to own the bucket in CdnStack. The bucket and the distribution belong in the same CDK stack because they're inseparable at the IAM level.
+
+---
+
+## 3. Monolith Variant
 
 ```python
-def _create_frontend(self, stage_name: str) -> None:
-    """
-    Layer 5: Frontend Infrastructure
+import aws_cdk as cdk
+from aws_cdk import (
+    RemovalPolicy, Duration,
+    aws_s3 as s3,
+    aws_s3_deployment as s3deploy,
+    aws_cloudfront as cf,
+    aws_cloudfront_origins as origins,
+    aws_certificatemanager as acm,
+)
 
-    Architecture:
-      S3 (private bucket) → CloudFront (OAC) → Users
-      WAF attached to CloudFront distribution
-      ACM certificate for custom domain (via Route53)
 
-    Security:
-      - S3 bucket is PRIVATE (no public access)
-      - CloudFront uses Origin Access Control (OAC) to access S3 (replaces deprecated OAI)
-      - WAF blocks common OWASP Top 10 attacks
-      - HTTPS-only with TLS 1.2 minimum
-      - Security headers via CloudFront Function
-    """
-    import aws_cdk.aws_cloudfront as cf
-    import aws_cdk.aws_cloudfront_origins as cf_origins
-    import aws_cdk.aws_wafv2 as wafv2
-    import aws_cdk.aws_certificatemanager as acm
-    import aws_cdk.aws_route53 as route53
-    import aws_cdk.aws_route53_targets as route53_targets
-
-    # =========================================================================
-    # S3 BUCKET — Private, encrypted, versioned
-    # =========================================================================
+def _create_frontend(self, stage: str) -> None:
     self.frontend_bucket = s3.Bucket(
         self, "FrontendBucket",
-        bucket_name=f"{{project_name}}-frontend-{stage_name}-{self.account}",
-
-        # Security: block ALL public access
-        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-
-        # Encryption at rest (S3-managed for CloudFront OAC compatibility)
+        bucket_name=f"{{project_name}}-frontend-{stage}",
         encryption=s3.BucketEncryption.S3_MANAGED,
-
-        # Versioning for rollback capability
-        versioned=True,
-
-        # CORS for same-origin API calls
-        cors=[
-            s3.CorsRule(
-                allowed_methods=[s3.HttpMethods.GET],
-                allowed_origins=["*"] if stage_name == "dev" else [
-                    f"https://{{project_name}}.example.com",
-                    f"https://www.{{project_name}}.example.com",
-                ],
-                allowed_headers=["*"],
-            )
-        ],
-
-        # Lifecycle rules for cost optimization
-        lifecycle_rules=[
-            s3.LifecycleRule(
-                id="DeleteOldVersions",
-                noncurrent_version_expiration=Duration.days(30 if stage_name == "prod" else 7),
-                enabled=True,
-            )
-        ],
-
-        # Environmental removal policies
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
-        auto_delete_objects=stage_name != "prod",
-
-        # Access logging
-        server_access_logs_prefix="frontend-access-logs/",
+        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+        enforce_ssl=True,
+        removal_policy=RemovalPolicy.DESTROY if stage != "prod" else RemovalPolicy.RETAIN,
+        auto_delete_objects=stage != "prod",
     )
 
-    # =========================================================================
-    # WAF — Web Application Firewall
-    # =========================================================================
-    # WAF v2 (scope: CLOUDFRONT must be in us-east-1)
-    waf_rules = [
-        # AWS Managed Rules: Core Rule Set (OWASP Top 10)
-        wafv2.CfnWebACL.RuleProperty(
-            name="AWSManagedRulesCommonRuleSet",
-            priority=1,
-            override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
-            statement=wafv2.CfnWebACL.StatementProperty(
-                managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
-                    vendor_name="AWS",
-                    name="AWSManagedRulesCommonRuleSet",
-                )
-            ),
-            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                cloud_watch_metrics_enabled=True,
-                metric_name="AWSManagedRulesCommonRuleSet",
-                sampled_requests_enabled=True,
-            ),
-        ),
-        # AWS Managed Rules: Known Bad Inputs
-        wafv2.CfnWebACL.RuleProperty(
-            name="AWSManagedRulesKnownBadInputsRuleSet",
-            priority=2,
-            override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
-            statement=wafv2.CfnWebACL.StatementProperty(
-                managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
-                    vendor_name="AWS",
-                    name="AWSManagedRulesKnownBadInputsRuleSet",
-                )
-            ),
-            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                cloud_watch_metrics_enabled=True,
-                metric_name="AWSManagedRulesKnownBadInputsRuleSet",
-                sampled_requests_enabled=True,
-            ),
-        ),
-        # Rate limiting rule (1000 req/5min per IP)
-        wafv2.CfnWebACL.RuleProperty(
-            name="RateLimitRule",
-            priority=3,
-            action=wafv2.CfnWebACL.RuleActionProperty(
-                block={} if stage_name == "prod" else {}
-            ),
-            statement=wafv2.CfnWebACL.StatementProperty(
-                rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
-                    limit=1000,
-                    aggregate_key_type="IP",
-                )
-            ),
-            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                cloud_watch_metrics_enabled=True,
-                metric_name="RateLimitRule",
-                sampled_requests_enabled=True,
-            ),
-        ),
-    ]
+    oac = cf.S3OriginAccessControl(self, "OAC")
 
-    self.waf_acl = wafv2.CfnWebACL(
-        self, "FrontendWAF",
-        name=f"{{project_name}}-frontend-waf-{stage_name}",
-        scope="CLOUDFRONT",  # Must be us-east-1 for CloudFront
-        default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
-        rules=waf_rules,
-        visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-            cloud_watch_metrics_enabled=True,
-            metric_name="{{project_name}}FrontendWAF",
-            sampled_requests_enabled=True,
-        ),
+    domain_names = [f"{{custom_domain_name}}"] if "{use_custom_domain}" == "true" else None
+    certificate = (
+        acm.Certificate.from_certificate_arn(self, "Cert", "{acm_certificate_arn}")
+        if domain_names else None
     )
-
-    # =========================================================================
-    # CLOUDFRONT — Security Headers Function
-    # =========================================================================
-    security_headers_fn = cf.Function(
-        self, "SecurityHeadersFn",
-        code=cf.FunctionCode.from_inline("""
-function handler(event) {
-    var response = event.response;
-    var headers = response.headers;
-
-    // Security headers
-    headers['strict-transport-security'] = { value: 'max-age=63072000; includeSubdomains; preload' };
-    headers['x-content-type-options']    = { value: 'nosniff' };
-    headers['x-frame-options']           = { value: 'DENY' };
-    headers['x-xss-protection']          = { value: '1; mode=block' };
-    headers['referrer-policy']           = { value: 'strict-origin-when-cross-origin' };
-    headers['permissions-policy']        = { value: 'camera=(), microphone=(), geolocation=()' };
-    headers['content-security-policy']   = {
-        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://execute-api.*.amazonaws.com"
-    };
-
-    return response;
-}
-"""),
-        function_name=f"{{project_name}}-security-headers-{stage_name}",
-    )
-
-    # =========================================================================
-    # CLOUDFRONT DISTRIBUTION
-    # =========================================================================
-    # Price class varies by environment (lower cost for dev/staging)
-    price_class = {
-        "dev":     cf.PriceClass.PRICE_CLASS_100,    # North America + Europe only
-        "staging": cf.PriceClass.PRICE_CLASS_100,
-        "prod":    cf.PriceClass.PRICE_CLASS_ALL,    # All CloudFront edge locations
-    }.get(stage_name, cf.PriceClass.PRICE_CLASS_100)
 
     self.distribution = cf.Distribution(
-        self, "Distribution",
-
-        # OAC: CloudFront accesses private S3 bucket via Origin Access Control
-        # (OAC replaces deprecated OAI — better security, supports SSE-KMS)
+        self, "Cdn",
+        comment=f"{{project_name}}-{stage}",
         default_behavior=cf.BehaviorOptions(
-            origin=cf_origins.S3BucketOrigin.with_origin_access_control(
-                self.frontend_bucket,
+            origin=origins.S3BucketOrigin.with_origin_access_control(
+                self.frontend_bucket, origin_access_control=oac,
             ),
             viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
             cache_policy=cf.CachePolicy.CACHING_OPTIMIZED,
+            response_headers_policy=cf.ResponseHeadersPolicy.SECURITY_HEADERS,
             compress=True,
-            # Apply security headers function on every response
-            function_associations=[
-                cf.FunctionAssociation(
-                    function=security_headers_fn,
-                    event_type=cf.FunctionEventType.VIEWER_RESPONSE,
-                )
-            ],
         ),
-
-        # API passthrough behavior (no caching)
-        additional_behaviors={
-            "/api/*": cf.BehaviorOptions(
-                origin=cf_origins.HttpOrigin(
-                    # Pass API calls to API Gateway
-                    # Replace with self.api.url after API layer is created
-                    f"{self.rest_api.rest_api_id}.execute-api.{self.region}.amazonaws.com",
-                    origin_path=f"/{stage_name}",
-                ),
-                viewer_protocol_policy=cf.ViewerProtocolPolicy.HTTPS_ONLY,
-                cache_policy=cf.CachePolicy.CACHING_DISABLED,
-                allowed_methods=cf.AllowedMethods.ALLOW_ALL,
-            ),
-        },
-
-        # SPA routing: all 404s → index.html (React Router support)
+        default_root_object="index.html",
+        minimum_protocol_version=cf.SecurityPolicyProtocol.TLS_V1_2_2021,
         error_responses=[
             cf.ErrorResponse(
-                http_status=404,
-                response_http_status=200,
-                response_page_path="/index.html",
+                http_status=403, response_http_status=200,
+                response_page_path="/index.html", ttl=Duration.seconds(0),
             ),
             cf.ErrorResponse(
-                http_status=403,
-                response_http_status=200,
-                response_page_path="/index.html",
+                http_status=404, response_http_status=200,
+                response_page_path="/index.html", ttl=Duration.seconds(0),
             ),
         ],
-
-        # WAF association
-        web_acl_id=self.waf_acl.attr_arn,
-
-        # SSL/TLS configuration
-        minimum_protocol_version=cf.SecurityPolicyProtocol.TLS_V1_2_2021,
-        ssl_support_method=cf.SSLMethod.SNI,
-
-        price_class=price_class,
-
-        # Access logging
-        enable_logging=True,
-        log_file_prefix="cloudfront-logs/",
-
-        # HTTP version
-        http_version=cf.HttpVersion.HTTP2_AND_3,
+        domain_names=domain_names, certificate=certificate,
     )
 
-    # Grant CloudFront OAC access to S3 (auto-configured by S3BucketOrigin.with_origin_access_control)
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    self.frontend_url_output = CfnOutput(
-        self, "FrontendURL",
-        value=f"https://{self.distribution.distribution_domain_name}",
-        description="Frontend CloudFront URL",
-        export_name=f"{{project_name}}-frontend-url-{stage_name}",
+    # Deploy React build artifacts
+    s3deploy.BucketDeployment(
+        self, "DeployReact",
+        sources=[s3deploy.Source.asset("frontend/dist")],
+        destination_bucket=self.frontend_bucket,
+        distribution=self.distribution,
+        distribution_paths=["/*"],
+        prune=True,
+        retain_on_delete=stage == "prod",
     )
 
-    CfnOutput(
-        self, "FrontendBucketName",
-        value=self.frontend_bucket.bucket_name,
-        description="S3 bucket for frontend assets",
-        export_name=f"{{project_name}}-frontend-bucket-{stage_name}",
-    )
+    cdk.CfnOutput(self, "CdnUrl",          value=f"https://{self.distribution.distribution_domain_name}")
+    cdk.CfnOutput(self, "DistributionId",  value=self.distribution.distribution_id)
+```
 
-    CfnOutput(
-        self, "CloudFrontDistributionId",
-        value=self.distribution.distribution_id,
-        description="CloudFront Distribution ID (for cache invalidation)",
-        export_name=f"{{project_name}}-cloudfront-id-{stage_name}",
-    )
+### 3.1 Monolith gotchas
+
+- **`S3BucketOrigin.with_origin_access_control`** auto-writes a bucket policy statement. Works fine in monolith (same stack).
+- **`BucketDeployment`** needs local Docker or `use_efs=False`. Size ≤ 512 MB.
+- **`response_headers_policy=SECURITY_HEADERS`** applies a managed policy; customize via `cf.ResponseHeadersPolicy` to add CSP.
+- **Custom domain certificate** MUST be in `us-east-1` for CloudFront, regardless of your app region.
+
+---
+
+## 4. Micro-Stack Variant — THE CORRECT PATTERN
+
+**Principle:** the frontend bucket lives in `CdnStack`, not `FrontendStack`. `FrontendStack` (if it exists) becomes a deploy-only stack or is merged into `CdnStack` entirely.
+
+### 4.1 `CdnStack` — owns bucket + distribution
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    RemovalPolicy, Duration,
+    aws_s3 as s3,
+    aws_s3_deployment as s3deploy,
+    aws_cloudfront as cf,
+    aws_cloudfront_origins as origins,
+)
+from constructs import Construct
+
+
+class CdnStack(cdk.Stack):
+    """Owns frontend bucket + CloudFront distribution together.
+
+    These two resources are inseparable at the IAM level — the bucket's policy
+    MUST reference the distribution's ARN (via OAC). Splitting them across
+    stacks creates an unavoidable circular CloudFormation export.
+    """
+
+    def __init__(
+        self,
+        scope: Construct,
+        api_url: str,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-cdn", **kwargs)
+
+        self.frontend_bucket = s3.Bucket(
+            self, "FrontendBucket",
+            bucket_name="{project_name}-frontend",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            removal_policy=RemovalPolicy.DESTROY,  # POC
+            auto_delete_objects=True,
+        )
+
+        oac = cf.S3OriginAccessControl(self, "OAC")
+
+        self.distribution = cf.Distribution(
+            self, "Cdn",
+            default_behavior=cf.BehaviorOptions(
+                origin=origins.S3BucketOrigin.with_origin_access_control(
+                    self.frontend_bucket, origin_access_control=oac,
+                ),
+                viewer_protocol_policy=cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                cache_policy=cf.CachePolicy.CACHING_OPTIMIZED,
+                response_headers_policy=cf.ResponseHeadersPolicy.SECURITY_HEADERS,
+                compress=True,
+            ),
+            default_root_object="index.html",
+            minimum_protocol_version=cf.SecurityPolicyProtocol.TLS_V1_2_2021,
+            error_responses=[
+                cf.ErrorResponse(http_status=403, response_http_status=200,
+                                  response_page_path="/index.html", ttl=Duration.seconds(0)),
+                cf.ErrorResponse(http_status=404, response_http_status=200,
+                                  response_page_path="/index.html", ttl=Duration.seconds(0)),
+            ],
+        )
+
+        # OPTIONAL: deploy React build if dist/ exists at synth time
+        # Comment out if the deployment happens via a separate CI step.
+        # s3deploy.BucketDeployment(
+        #     self, "DeployReact",
+        #     sources=[s3deploy.Source.asset("frontend/dist")],
+        #     destination_bucket=self.frontend_bucket,
+        #     distribution=self.distribution,
+        #     distribution_paths=["/*"],
+        # )
+
+        cdk.CfnOutput(self, "CdnUrl",         value=f"https://{self.distribution.distribution_domain_name}")
+        cdk.CfnOutput(self, "DistributionId", value=self.distribution.distribution_id)
+        cdk.CfnOutput(self, "FrontendBucket", value=self.frontend_bucket.bucket_name)
+```
+
+### 4.2 Optional `FrontendStack` — deploy-only
+
+If you want a separate stack for deployment cadence (e.g. frontend team deploys 10x/day, infra team rarely), create it AFTER CdnStack and consume `cdn.frontend_bucket` one-way.
+
+```python
+class FrontendDeployStack(cdk.Stack):
+    def __init__(self, scope, frontend_bucket: s3.IBucket, distribution: cf.IDistribution, **kwargs):
+        super().__init__(scope, "{project_name}-frontend-deploy", **kwargs)
+        s3deploy.BucketDeployment(
+            self, "DeployReact",
+            sources=[s3deploy.Source.asset("frontend/dist")],
+            destination_bucket=frontend_bucket,
+            distribution=distribution,
+            distribution_paths=["/*"],
+            prune=True,
+        )
+```
+
+`BucketDeployment` is a custom resource; it grants its own Lambda temporary write access to the bucket. CDK scopes this correctly across stacks. Safe.
+
+### 4.3 Micro-stack gotchas
+
+- **Never create the bucket in `FrontendStack` and the distribution in `CdnStack`.** This is the cycle that bit us.
+- **`BucketDeployment.retain_on_delete`** defaults to `False` in non-prod; flipping this may orphan a Lambda role.
+- **`distribution.distribution_id`** is a token; don't interpolate it into a string that ends up in another stack's resource policy (same OAC cycle trap in a different disguise).
+- **Custom domain certificate** must be in `us-east-1`. If your main stack is in a different region, use `cross_region_references=True` on the app OR create a separate `us-east-1` certificate stack.
+
+---
+
+## 5. Swap matrix
+
+| Trigger | Action |
+|---|---|
+| POC / single team | Monolith — bucket + distribution together |
+| Frontend deployed independently from infra | CdnStack owns both resources; optional FrontendDeployStack does only BucketDeployment |
+| Multiple distributions (public + internal) share one bucket | Rare; nearly always an anti-pattern. Create two buckets |
+| Need WAF | Add `web_acl_id=` to `cf.Distribution` — see `SECURITY_WAF_SHIELD_MACIE` |
+
+---
+
+## 6. Worked example — verify no cycle
+
+```python
+def test_cdn_stack_synthesizes_without_cross_stack_cycle():
+    import aws_cdk as cdk
+    from aws_cdk.assertions import Template
+    from infrastructure.cdk.stacks.cdn_stack import CdnStack
+
+    app = cdk.App()
+    env = cdk.Environment(account="000000000000", region="us-east-1")
+
+    # No separate FrontendStack — CdnStack owns its bucket
+    cdn = CdnStack(app, api_url="https://api.example.com/v1", env=env)
+
+    t = Template.from_stack(cdn)
+    t.resource_count_is("AWS::CloudFront::Distribution", 1)
+    t.resource_count_is("AWS::S3::Bucket", 1)
+    # If a cycle existed, the from_stack() call would raise during synth.
 ```
 
 ---
 
-## Deployment Note
+## 7. References
 
-After `cdk deploy`, run the frontend deployment separately:
+- `docs/template_params.md` — `CUSTOM_DOMAIN_NAME`, `ACM_CERTIFICATE_ARN`
+- `docs/Feature_Roadmap.md` — CDN-01..CDN-11, FE-01..FE-20
+- Related SOPs: `LAYER_API` (CORS origin), `SECURITY_WAF_SHIELD_MACIE` (WAF attach)
 
-```bash
-# Build React app
-cd frontend && npm run build
+---
 
-# Deploy to S3
-aws s3 sync ./frontend/build s3://$BUCKET_NAME --delete
+## 8. Changelog
 
-# Invalidate CloudFront cache
-aws cloudfront create-invalidation \
-    --distribution-id $DISTRIBUTION_ID \
-    --paths "/*"
-```
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Micro-Stack variant explicitly mandates: bucket + distribution in the same stack. Documented the OAC cross-stack cycle as the canonical landmine. |
+| 1.0 | 2026-03-05 | Initial (bucket in FrontendStack, distribution in CdnStack — CYCLE-PRONE). |

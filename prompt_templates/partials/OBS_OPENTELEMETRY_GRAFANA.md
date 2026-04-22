@@ -1,313 +1,203 @@
-# PARTIAL: Advanced Observability — OpenTelemetry, Managed Grafana, Prometheus, RUM
+# SOP — OpenTelemetry, Managed Grafana, Managed Prometheus, RUM
 
-**Usage:** Include when SOW mentions observability platform, Grafana, Prometheus, OpenTelemetry, distributed tracing, real user monitoring, or modern observability stack.
-
----
-
-## Observability Stack
-
-```
-Application (Lambda, ECS, EKS)
-       │  instrumented with
-       ▼
-OpenTelemetry SDK (auto-instrumentation)
-       │  sends spans/metrics/logs to
-       ▼
-AWS Distro for OpenTelemetry (ADOT) Collector
-  ├── Traces  → AWS X-Ray (distributed tracing)
-  ├── Metrics → Amazon Managed Service for Prometheus (AMP)
-  └── Logs    → CloudWatch Logs (structured JSON)
-                           │
-                           ▼
-              Amazon Managed Grafana (AMG)
-              ├── Pre-built dashboards (Lambda, ECS, RDS, SQS...)
-              ├── Tempo (trace visualization)
-              ├── Loki (log aggregation)
-              └── Alertmanager → PagerDuty / Slack / OpsGenie
-
-CloudWatch RUM (Real User Monitoring)
-  → Browser session recording, Core Web Vitals, JS errors, user journey
-```
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+) · ADOT collector · Amazon Managed Grafana · Amazon Managed Prometheus · CloudWatch RUM
 
 ---
 
-## CDK Code Block — Advanced Observability
+## 1. Purpose
+
+Third-party / open-standards observability stack on top of AWS-native telemetry:
+
+- **ADOT (AWS Distro for OpenTelemetry)** Lambda layer for trace/metric/log forwarding
+- **Amazon Managed Grafana** workspaces for exec dashboards
+- **Amazon Managed Prometheus** for Prometheus-compatible metric scraping (Fargate/EKS)
+- **CloudWatch RUM** for client-side real user monitoring (JS SDK)
+- **X-Ray → Grafana** data source
+
+Include when SOW mentions: Grafana, Prometheus, OpenTelemetry, distributed tracing, real user monitoring.
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| All observability infra in one stack | **§3 Monolith Variant** |
+| Dedicated `ObsStack` consumed by workload stacks | **§4 Micro-Stack Variant** |
+
+No cycle risk. RUM and Grafana are read-only observers.
+
+---
+
+## 3. Monolith Variant
+
+### 3.1 ADOT Lambda layer
 
 ```python
-def _create_advanced_observability(self, stage_name: str) -> None:
-    """
-    Advanced Observability Stack.
+import aws_cdk as cdk
+from aws_cdk import aws_lambda as _lambda
 
-    Components:
-      A) Amazon Managed Service for Prometheus (AMP) — metrics storage
-      B) Amazon Managed Grafana (AMG) — dashboards + alerting
-      C) ADOT Collector Layer for Lambda (OpenTelemetry auto-instrumentation)
-      D) CloudWatch RUM (Real User Monitoring for frontend)
-      E) CloudWatch Embedded Metrics Format (EMF) helper
-      F) Custom SLO/SLI dashboard + error budget tracking
-    """
 
-    import aws_cdk.aws_aps as aps  # Amazon Managed Prometheus
-    import aws_cdk.aws_grafana as grafana
-    import aws_cdk.aws_rum as rum
-
-    # =========================================================================
-    # A) AMAZON MANAGED PROMETHEUS (AMP)
-    # Fully managed Prometheus — no servers to manage
-    # =========================================================================
-
-    amp_workspace = aps.CfnWorkspace(
-        self, "AMPWorkspace",
-        alias=f"{{project_name}}-{stage_name}",
-
-        # Alert manager configuration (routes alerts to Grafana AlertManager)
-        alert_manager_definition="""
-alertmanager_config: |
-  route:
-    receiver: 'default'
-    group_by: ['alertname', 'cluster', 'service']
-    group_wait:      30s
-    group_interval:  5m
-    repeat_interval: 1h
-    routes:
-      - match: { severity: critical }
-        receiver: 'critical'
-        repeat_interval: 15m
-  receivers:
-    - name: 'default'
-      sns_configs:
-        - topic_arn: PLACEHOLDER_SNS_ARN  # [Claude: replace with alert_topic.topic_arn]
-          api_url: 'https://sns.REGION.amazonaws.com/'
-          sigv4:
-            region: REGION
-            role_arn: PLACEHOLDER_ROLE_ARN
-    - name: 'critical'
-      pagerduty_configs:
-        - service_key: 'PLACEHOLDER_PAGERDUTY_KEY'  # [Claude: from Secrets Manager]
-""",
-
-        # Recording rules — pre-compute expensive queries for fast dashboards
-        rule_groups_namespace=aps.CfnWorkspace.RuleGroupsNamespaceProperty(
-            name=f"{{project_name}}-rules",
-            data="""
-groups:
-  - name: LatencyPercentiles
-    interval: 60s
-    rules:
-      - record: job:request_latency_seconds:p99
-        expr: histogram_quantile(0.99, rate(request_duration_seconds_bucket[5m]))
-      - record: job:request_latency_seconds:p95
-        expr: histogram_quantile(0.95, rate(request_duration_seconds_bucket[5m]))
-      - record: job:request_error_rate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m])
-
-  - name: SLOErrorBudget
-    interval: 60s
-    rules:
-      # SLO: 99.9% availability (allows 43.8 minutes downtime/month)
-      - record: slo:error_budget_remaining:ratio
-        expr: 1 - (1 - 0.999) * 30 * 24 * 60 / job:request_error_rate
-      - alert: ErrorBudgetBurning
-        expr: slo:error_budget_remaining:ratio < 0.5
-        for: 10m
-        labels: { severity: critical }
-        annotations:
-          summary: "Error budget 50% consumed — SLO at risk"
-""",
-        ),
-
-        logging_configuration=aps.CfnWorkspace.LoggingConfigurationProperty(
-            log_group_arn=logs.LogGroup(
-                self, "AMPLogGroup",
-                log_group_name=f"/aws/prometheus/{{project_name}}-{stage_name}",
-                retention=logs.RetentionDays.ONE_MONTH,
-                encryption_key=self.kms_key,
-                removal_policy=RemovalPolicy.RETAIN,
-            ).log_group_arn,
-        ),
-
-        tags=[{"key": "Project", "value": "{{project_name}}"}, {"key": "Stage", "value": stage_name}],
-    )
-
-    # =========================================================================
-    # B) AMAZON MANAGED GRAFANA (AMG)
-    # =========================================================================
-
-    grafana_role = iam.Role(
-        self, "GrafanaRole",
-        assumed_by=iam.ServicePrincipal("grafana.amazonaws.com"),
-        role_name=f"{{project_name}}-grafana-{stage_name}",
-    )
-    grafana_role.add_to_policy(iam.PolicyStatement(
-        actions=[
-            "aps:QueryMetrics", "aps:GetSeries", "aps:GetLabels", "aps:GetMetricMetadata",
-            "cloudwatch:GetMetricData", "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
-            "xray:GetTraceSummaries", "xray:GetTrace", "xray:GetGroups",
-            "logs:StartQuery", "logs:GetQueryResults", "logs:DescribeLogGroups",
-            "ec2:DescribeRegions", "tag:GetResources",
-        ],
-        resources=["*"],
-    ))
-
-    grafana_workspace = grafana.CfnWorkspace(
-        self, "GrafanaWorkspace",
-        name=f"{{project_name}}-{stage_name}",
-        description=f"{{project_name}} Observability Dashboard ({stage_name})",
-        account_access_type="CURRENT_ACCOUNT",
-        authentication_providers=["AWS_SSO"],  # SSO via IAM Identity Center
-        permission_type="SERVICE_MANAGED",
-        role_arn=grafana_role.role_arn,
-        grafana_version="10.4",
-
-        data_sources=[
-            "CLOUDWATCH",           # CloudWatch Metrics + Logs
-            "PROMETHEUS",           # Amazon Managed Prometheus
-            "XRAY",                 # AWS X-Ray traces
-            "ATHENA",               # Athena for log analytics
-        ],
-
-        notification_destinations=["SNS"],
-        vpc_configuration=grafana.CfnWorkspace.VpcConfigurationProperty(
-            security_group_ids=[self.lambda_sg.security_group_id],
-            subnet_ids=[s.subnet_id for s in self.vpc.private_subnets[:2]],
-        ) if stage_name == "prod" else None,
-
-        organization_role_name="ADMIN",
-        organizational_units=[],
-
-        tags=[{"key": "Project", "value": "{{project_name}}"}],
-    )
-
-    # =========================================================================
-    # C) ADOT LAMBDA LAYER (OpenTelemetry auto-instrumentation for Lambda)
-    # Zero-code changes to add OpenTelemetry to Lambda functions
-    # =========================================================================
-
-    # ADOT Lambda Layer ARN — language-specific
-    ADOT_LAYER_ARNS = {
-        "python": f"arn:aws:lambda:{self.region}:901920570463:layer:aws-otel-python-amd64-ver-1-21-0:1",
-        "nodejs": f"arn:aws:lambda:{self.region}:901920570463:layer:aws-otel-nodejs-amd64-ver-1-18-1:1",
-        "java":   f"arn:aws:lambda:{self.region}:901920570463:layer:aws-otel-java-wrapper-amd64-ver-1-32-0:1",
-    }
-
-    # [Claude: add ADOT layer to all Lambda functions in the project]
-    # Example: Add to any Lambda function in your stack:
-    # fn.add_layers(_lambda.LayerVersion.from_layer_version_arn(self, "ADOT", ADOT_LAYER_ARNS["python"]))
-    # fn.add_environment("AWS_LAMBDA_EXEC_WRAPPER", "/opt/otel-instrument")
-    # fn.add_environment("OPENTELEMETRY_COLLECTOR_CONFIG_FILE", "/var/task/otel-config.yaml")
-    # fn.add_environment("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
-
-    # SSM parameter to store ADOT config (shared across all Lambdas)
-    ssm.StringParameter(
-        self, "ADOTConfigParam",
-        parameter_name=f"/{{project_name}}/{stage_name}/adot-collector-config",
-        string_value=json.dumps({
-            "receivers": {"otlp": {"protocols": {"grpc": {"endpoint": "0.0.0.0:4317"}}}},
-            "processors": {
-                "batch": {"timeout": "1s", "send_batch_size": 50},
-                "resource": {"attributes": [
-                    {"key": "service.name", "value": "{{project_name}}", "action": "insert"},
-                    {"key": "deployment.environment", "value": stage_name, "action": "insert"},
-                ]},
-            },
-            "exporters": {
-                "awsxray": {},
-                "awsprometheusremotewrite": {"endpoint": f"https://aps-workspaces.{self.region}.amazonaws.com/workspaces/{amp_workspace.attr_arn}/api/v1/remote_write"},
-                "awscloudwatchlogs": {"log_group_name": f"/aws/otel/{{project_name}}-{stage_name}"},
-            },
-            "service": {
-                "pipelines": {
-                    "traces": {"receivers": ["otlp"], "processors": ["batch", "resource"], "exporters": ["awsxray"]},
-                    "metrics": {"receivers": ["otlp"], "processors": ["batch", "resource"], "exporters": ["awsprometheusremotewrite"]},
-                    "logs": {"receivers": ["otlp"], "processors": ["batch"], "exporters": ["awscloudwatchlogs"]},
-                }
-            },
-        }),
-        description="ADOT Collector configuration for all Lambda functions",
-    )
-
-    # =========================================================================
-    # D) CLOUDWATCH RUM (Real User Monitoring)
-    # Track frontend performance: Core Web Vitals, JS errors, user sessions
-    # =========================================================================
-
-    rum_monitor = rum.CfnAppMonitor(
-        self, "RUMAppMonitor",
-        name=f"{{project_name}}-{stage_name}",
-        domain=f"{{project_name}}.com",  # [Claude: replace with actual domain]
-        app_monitor_configuration=rum.CfnAppMonitor.AppMonitorConfigurationProperty(
-            allow_cookies=True,
-            enable_x_ray=True,       # Connect RUM sessions to X-Ray traces
-            session_sample_rate=stage_name != "prod" and 1.0 or 0.1,  # Sample 10% in prod
-            telemetries=["performance", "errors", "http"],
-            included_pages=[".*"],   # Monitor all pages
-            excluded_pages=["/healthcheck", "/internal/.*"],
-        ),
-        cw_log_enabled=True,         # Send RUM data to CloudWatch Logs
-        custom_events=rum.CfnAppMonitor.CustomEventsProperty(status="ENABLED"),
-    )
-
-    # =========================================================================
-    # E) SLO DASHBOARD — Error Budget Tracking
-    # =========================================================================
-
-    cw.Dashboard(
-        self, "SLODashboard",
-        dashboard_name=f"{{project_name}}-slo-{stage_name}",
-        widgets=[
-            [
-                cw.GraphWidget(
-                    title="Availability SLO (Target: 99.9%)",
-                    left=[
-                        cw.MathExpression(
-                            expression="(1 - errors/requests) * 100",
-                            using_metrics={
-                                "errors":   cw.Metric(namespace="{{project_name}}", metric_name="5xxErrors",
-                                                      dimensions_map={"Stage": stage_name}, statistic="Sum"),
-                                "requests": cw.Metric(namespace="{{project_name}}", metric_name="TotalRequests",
-                                                      dimensions_map={"Stage": stage_name}, statistic="Sum"),
-                            },
-                        )
-                    ],
-                    right=[
-                        cw.Metric(namespace="{{project_name}}", metric_name="ErrorBudgetRemaining",
-                                  dimensions_map={"Stage": stage_name}, statistic="Average"),
-                    ],
-                    period=Duration.hours(1),
-                    width=12,
-                ),
-                cw.GraphWidget(
-                    title="Latency p95/p99 vs SLO Threshold",
-                    left=[
-                        cw.Metric(namespace="AWS/ApiGateway", metric_name="Latency",
-                                  dimensions_map={"ApiName": f"{{project_name}}-api-{stage_name}"},
-                                  statistic="p95"),
-                        cw.Metric(namespace="AWS/ApiGateway", metric_name="Latency",
-                                  dimensions_map={"ApiName": f"{{project_name}}-api-{stage_name}"},
-                                  statistic="p99"),
-                    ],
-                    width=12,
-                ),
-            ],
-        ],
-    )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "AMPWorkspaceArn",
-        value=amp_workspace.attr_arn,
-        description="Amazon Managed Prometheus workspace ARN",
-        export_name=f"{{project_name}}-amp-{stage_name}",
-    )
-    CfnOutput(self, "GrafanaWorkspaceUrl",
-        value=grafana_workspace.attr_endpoint,
-        description="Grafana dashboard URL",
-        export_name=f"{{project_name}}-grafana-{stage_name}",
-    )
-    CfnOutput(self, "RUMAppMonitorId",
-        value=rum_monitor.attr_id,
-        description="CloudWatch RUM App Monitor ID — embed snippet in frontend",
-        export_name=f"{{project_name}}-rum-{stage_name}",
-    )
+# ADOT layer (check latest ARN in docs)
+adot_layer = _lambda.LayerVersion.from_layer_version_arn(
+    self, "AdotLayer",
+    layer_version_arn=f"arn:aws:lambda:{self.region}:901920570463:layer:aws-otel-python-amd64-ver-1-25-0:1",
+)
+# Attach to each Lambda:
+for fn in self.lambda_functions.values():
+    fn.add_layers(adot_layer)
+    fn.add_environment("AWS_LAMBDA_EXEC_WRAPPER", "/opt/otel-instrument")
+    fn.add_environment("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
 ```
+
+### 3.2 Amazon Managed Grafana
+
+```python
+from aws_cdk import aws_grafana as grafana
+
+
+self.grafana = grafana.CfnWorkspace(
+    self, "GrafanaWorkspace",
+    account_access_type="CURRENT_ACCOUNT",
+    authentication_providers=["AWS_SSO"],
+    permission_type="SERVICE_MANAGED",
+    name=f"{{project_name}}-grafana-{stage}",
+    data_sources=["CLOUDWATCH", "PROMETHEUS", "XRAY"],
+)
+```
+
+### 3.3 Amazon Managed Prometheus
+
+```python
+from aws_cdk import aws_aps as aps
+
+
+self.prom = aps.CfnWorkspace(
+    self, "PromWorkspace",
+    alias=f"{{project_name}}-prom-{stage}",
+)
+```
+
+### 3.4 CloudWatch RUM (client-side)
+
+```python
+from aws_cdk import aws_rum as rum
+
+
+self.rum_app = rum.CfnAppMonitor(
+    self, "RumApp",
+    name=f"{{project_name}}-rum-{stage}",
+    domain="{custom_domain_name}",
+    app_monitor_configuration=rum.CfnAppMonitor.AppMonitorConfigurationProperty(
+        allow_cookies=False,
+        enable_x_ray=True,
+        session_sample_rate=0.1,   # 10% of sessions sampled
+        telemetries=["performance", "errors", "http"],
+    ),
+    custom_events=rum.CfnAppMonitor.CustomEventsProperty(status="ENABLED"),
+)
+```
+
+### 3.5 Monolith gotchas
+
+- **ADOT layer ARN** is region-specific. Look up the latest per-region ARN from [AWS docs](https://aws-otel.github.io/docs/getting-started/lambda).
+- **Grafana workspace** requires AWS SSO to be enabled in the account.
+- **Prometheus scrape targets** must push to the workspace's `remote_write` endpoint (no pull model).
+- **RUM domain** must be the frontend's public domain; CORS from CloudFront + RUM script are required.
+
+---
+
+## 4. Micro-Stack Variant
+
+### 4.1 `ObsStack` — all advanced obs together
+
+```python
+import aws_cdk as cdk
+from aws_cdk import (
+    aws_grafana as grafana,
+    aws_aps as aps,
+    aws_rum as rum,
+    aws_lambda as _lambda,
+)
+from constructs import Construct
+
+
+class ObsStack(cdk.Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        lambda_fns: dict[str, _lambda.IFunction] | None = None,
+        frontend_domain: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-obs", **kwargs)
+
+        # Attach ADOT to cross-stack Lambdas — layer attachment is safe (no policy mutation).
+        if lambda_fns:
+            adot_layer = _lambda.LayerVersion.from_layer_version_arn(
+                self, "AdotLayer",
+                layer_version_arn=f"arn:aws:lambda:{self.region}:901920570463:layer:aws-otel-python-amd64-ver-1-25-0:1",
+            )
+            for fn in lambda_fns.values():
+                fn.add_layers(adot_layer)
+
+        self.grafana = grafana.CfnWorkspace(
+            self, "Grafana",
+            account_access_type="CURRENT_ACCOUNT",
+            authentication_providers=["AWS_SSO"],
+            permission_type="SERVICE_MANAGED",
+            name="{project_name}-grafana",
+            data_sources=["CLOUDWATCH", "PROMETHEUS", "XRAY"],
+        )
+        self.prom = aps.CfnWorkspace(self, "Prom", alias="{project_name}-prom")
+
+        if frontend_domain:
+            self.rum_app = rum.CfnAppMonitor(
+                self, "Rum",
+                name="{project_name}-rum",
+                domain=frontend_domain,
+                app_monitor_configuration=rum.CfnAppMonitor.AppMonitorConfigurationProperty(
+                    allow_cookies=False,
+                    enable_x_ray=True,
+                    session_sample_rate=0.1,
+                    telemetries=["performance", "errors", "http"],
+                ),
+            )
+
+        cdk.CfnOutput(self, "GrafanaUrl", value=self.grafana.attr_endpoint)
+        cdk.CfnOutput(self, "PromUrl",    value=self.prom.attr_prometheus_endpoint)
+```
+
+### 4.2 Micro-stack gotchas
+
+- **`fn.add_layers(layer)`** cross-stack adds the layer ARN to the function's LayersConfiguration (one-way). No cycle.
+- **`fn.add_environment(key, value)`** cross-stack mutates the function's Environment block — this IS a mutation; CDK tracks it but requires a redeploy of the consumer stack. Use a `CfnOutput` of env-var values and let the consumer stack read them instead if independent deploy cadence matters.
+
+---
+
+## 5. Worked example
+
+```python
+def test_obs_stack_creates_grafana_and_prom():
+    # ... instantiate ObsStack ...
+    t = Template.from_stack(obs)
+    t.resource_count_is("AWS::Grafana::Workspace", 1)
+    t.resource_count_is("AWS::APS::Workspace", 1)
+```
+
+---
+
+## 6. References
+
+- `docs/Feature_Roadmap.md` — OBS-22, OBS-23, OBS-24, OBS-27, TRC-12, FE-13
+- Related SOPs: `LAYER_OBSERVABILITY` (CloudWatch baseline), `LAYER_FRONTEND` (RUM domain)
+
+---
+
+## 7. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Cross-stack layer attachment is safe; env-var mutation noted. |
+| 1.0 | 2026-03-05 | Initial. |

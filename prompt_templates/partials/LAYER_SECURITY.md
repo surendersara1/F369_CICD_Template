@@ -1,249 +1,283 @@
-# PARTIAL: Security Layer CDK Constructs
+# SOP — Security Layer (KMS, IAM Baseline, Permission Boundaries)
 
-**Usage:** Referenced by `02A_APP_STACK_GENERATOR.md` for the `_create_security()` method body.
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
 
-## CDK Code Block — Security Layer
+## 1. Purpose
+
+Foundation security primitives consumed by every other layer:
+
+- KMS CMKs with rotation (one per data-class, not a single shared key)
+- IAM permission boundary (mandatory ceiling on every workload role)
+- Baseline managed policies (read-only auditor, operator)
+- Cross-stack KMS grants (critical — most micro-stack cycles originate here)
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+**This is the stack most responsible for cross-stack cycles.** Every downstream compute consumer wants Encrypt/Decrypt on a CMK that this stack owns. The *wrong* pattern (resource-policy grants) creates circular exports. The *right* pattern (identity-side grants on consumer roles) stays unidirectional.
+
+| You are… | Use variant |
+|---|---|
+| KMS keys, IAM roles, and the workloads that use them all live in ONE stack | **§3 Monolith Variant** |
+| KMS keys live in `SecurityStack`; Lambdas / ECS / RDS live in separate stacks | **§4 Micro-Stack Variant** |
+
+---
+
+## 3. Monolith Variant
 
 ```python
-def _create_security(self, stage_name: str) -> None:
-    """
-    Layer 1: Security Infrastructure
+import aws_cdk as cdk
+from aws_cdk import Duration, aws_kms as kms, aws_iam as iam
 
-    Components:
-      A) KMS Customer Managed Keys (CMK) for encryption
-      B) Secrets Manager secrets (DB credentials, API keys)
-      C) Baseline IAM roles and policies
-      D) GuardDuty + Security Hub (prod/staging)
-      E) CloudTrail (all environments for SOC2/HIPAA)
 
-    Principles:
-      - All encryption uses Customer Managed Keys (CMK), not AWS-managed
-      - All secrets in Secrets Manager with automatic rotation
-      - GuardDuty threat detection in prod and staging
-      - CloudTrail captures all API-level activity
-    """
-
-    # =========================================================================
-    # A) KMS — Customer Managed Keys
-    # =========================================================================
-
-    # Master encryption key for all data (PHI, databases, queues, S3)
-    self.kms_key = kms.Key(
-        self, "MasterKey",
-        alias=f"alias/{{project_name}}-master-{stage_name}",
-        description=f"{{project_name}} master encryption key ({stage_name}) — encrypts all data at rest",
-
-        # Key rotation (automatic annual rotation when enabled)
+def _create_security(self, stage: str) -> None:
+    # One CMK per data class. Don't share one "app" key across audio + metadata + logs.
+    self.audio_data_key = kms.Key(
+        self, "AudioDataKey",
+        alias=f"alias/{{project_name}}-audio-data-{stage}",
         enable_key_rotation=True,
-
-        # Key policy: allow account root + specific service principals
-        # [Claude: CDK automatically creates key policy — customize if needed]
-
-        # Multi-region key (for DR — only if multi-region is in Architecture Map)
-        # multi_region=True,
-
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
+        rotation_period=Duration.days(365),
+        description="S3 audio, transcripts, reports",
     )
-
-    # Pipeline-specific key (for CodePipeline artifacts)
-    self.pipeline_key = kms.Key(
-        self, "PipelineKey",
-        alias=f"alias/{{project_name}}-pipeline-{stage_name}",
-        description=f"{{project_name}} pipeline artifact encryption key ({stage_name})",
+    self.job_metadata_key = kms.Key(
+        self, "JobMetadataKey",
+        alias=f"alias/{{project_name}}-job-metadata-{stage}",
         enable_key_rotation=True,
-        removal_policy=RemovalPolicy.DESTROY,
+        description="RDS, DynamoDB, Secrets Manager",
     )
-
-    # =========================================================================
-    # B) SECRETS MANAGER
-    # =========================================================================
-
-    # Note: Aurora credentials secret is created in _create_data_layer()
-    # Additional secrets defined here:
-
-    # [Claude: Add one Secret per external API credential from Architecture Map L1]
-    # Example: External API credentials (placeholder — populate via Console or CLI)
-    self.external_api_secret = sm.Secret(
-        self, "ExternalApiSecret",
-        secret_name=f"/{{project_name}}/{stage_name}/integrations/external-api",
-        description="External API credentials (client_id, client_secret, base_url)",
-        generate_secret_string=sm.SecretStringGenerator(
-            secret_string_template='{"client_id": "REPLACE_ME", "base_url": "REPLACE_ME"}',
-            generate_string_key="client_secret",
-            exclude_characters="\"@/\\ '",
-            password_length=32,
-        ),
-        encryption_key=self.kms_key,
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
+    self.logs_key = kms.Key(
+        self, "LogsKey",
+        alias=f"alias/{{project_name}}-logs-{stage}",
+        enable_key_rotation=True,
+        description="CloudWatch Logs group encryption",
     )
+    # CloudWatch Logs needs a service principal on the key policy
+    self.logs_key.grant_encrypt_decrypt(iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com"))
 
-    # Slack webhook for pipeline notifications (if applicable)
-    self.slack_webhook_secret = sm.Secret(
-        self, "SlackWebhookSecret",
-        secret_name=f"/{{project_name}}/{stage_name}/notifications/slack-webhook",
-        description="Slack webhook URL for DevOps notifications",
-        encryption_key=self.kms_key,
-        removal_policy=RemovalPolicy.DESTROY,
-    )
-
-    # =========================================================================
-    # C) BASELINE IAM ROLES
-    # =========================================================================
-
-    # Lambda Execution Role (base role — each Lambda also gets service-specific grants)
-    # Note: CDK creates per-Lambda roles automatically. This is a custom SHARED role
-    # [Claude: For HIPAA/SOC2, prefer per-Lambda roles — remove shared role if compliance needed]
-    self.lambda_base_role = iam.Role(
-        self, "LambdaBaseRole",
-        assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-        role_name=f"{{project_name}}-lambda-base-{stage_name}",
-        managed_policies=[
-            # VPC access for Lambda (create/delete ENIs)
-            iam.ManagedPolicy.from_aws_managed_policy_name(
-                "service-role/AWSLambdaVPCAccessExecutionRole"
+    # Permission boundary — every workload role must attach this
+    self.permission_boundary = iam.ManagedPolicy(
+        self, "WorkloadPermissionBoundary",
+        managed_policy_name=f"{{project_name}}-workload-boundary-{stage}",
+        description="Hard ceiling on what any workload role can do",
+        statements=[
+            iam.PolicyStatement(
+                sid="AllowAppNamespacedResources",
+                effect=iam.Effect.ALLOW,
+                actions=["*"],
+                resources=["*"],
+                # Narrow with conditions; below is a starter — tighten per project.
+                conditions={
+                    "StringEquals": {"aws:ResourceTag/Project": "{project_name}"}
+                },
+            ),
+            iam.PolicyStatement(
+                sid="DenyIamAdmin",
+                effect=iam.Effect.DENY,
+                actions=[
+                    "iam:CreateUser", "iam:CreateAccessKey", "iam:PutUserPolicy",
+                    "iam:AttachUserPolicy", "iam:CreateLoginProfile",
+                ],
+                resources=["*"],
             ),
         ],
-        inline_policies={
-            "CloudWatchLogs": iam.PolicyDocument(
-                statements=[
-                    iam.PolicyStatement(
-                        effect=iam.Effect.ALLOW,
-                        actions=["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-                        resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:/{{project_name}}/*"],
-                    ),
-                ]
-            ),
-            "XRay": iam.PolicyDocument(
-                statements=[
-                    iam.PolicyStatement(
-                        effect=iam.Effect.ALLOW,
-                        actions=["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
-                        resources=["*"],
-                    ),
-                ]
-            ),
-        },
     )
-    # Allow Lambda to use the master KMS key
-    self.kms_key.grant_encrypt_decrypt(self.lambda_base_role)
 
-    # =========================================================================
-    # D) GUARDDUTY (threat detection — prod + staging)
-    # =========================================================================
+    # Auditor policy (read-only across the app)
+    self.auditor_policy = iam.ManagedPolicy(
+        self, "AuditorReadOnly",
+        managed_policy_name=f"{{project_name}}-auditor-{stage}",
+        statements=[
+            iam.PolicyStatement(
+                actions=["s3:GetBucket*", "s3:ListBucket*", "s3:GetObject*",
+                         "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan",
+                         "logs:Describe*", "logs:Get*", "logs:FilterLogEvents",
+                         "cloudwatch:GetMetric*", "cloudwatch:ListMetrics"],
+                resources=["*"],
+            )
+        ],
+    )
 
-    if stage_name in ("staging", "prod"):
-        # Enable GuardDuty detector
-        guardduty_detector = guardduty.CfnDetector(
-            self, "GuardDutyDetector",
-            enable=True,
-            finding_publishing_frequency="FIFTEEN_MINUTES" if stage_name == "prod" else "ONE_HOUR",
-            features=[
-                guardduty.CfnDetector.CFNFeatureConfigurationProperty(
-                    name="S3_DATA_EVENTS",
-                    status="ENABLED",
+    # In monolith, downstream workloads can use L2 grants directly:
+    #   self.audio_data_key.grant_encrypt(self.upload_fn)
+    #   self.job_metadata_key.grant_decrypt(self.status_fn)
+```
+
+### 3.1 Monolith gotchas
+
+- **Do not share one key across data classes.** If audio blob access leaks, don't want the same key to decrypt RDS credentials.
+- **Rotation cost:** enabling rotation on a CMK is free; the customer-master key *version* rotates once a year with no action from you. Disable only with a compelling reason.
+- **Log-group keys** need the CW Logs service principal on the key policy or log group creation fails.
+
+---
+
+## 4. Micro-Stack Variant
+
+### 4.1 `SecurityStack` — KMS + IAM baseline
+
+```python
+import aws_cdk as cdk
+from aws_cdk import Duration, aws_kms as kms, aws_iam as iam
+from constructs import Construct
+
+
+class SecurityStack(cdk.Stack):
+    """KMS CMKs and IAM baseline. NEVER mutated from downstream stacks."""
+
+    def __init__(self, scope: Construct, **kwargs) -> None:
+        super().__init__(scope, "{project_name}-security", **kwargs)
+
+        self.audio_data_key = kms.Key(
+            self, "AudioDataKey",
+            alias="alias/{project_name}-audio-data",
+            enable_key_rotation=True,
+            rotation_period=Duration.days(365),
+        )
+        self.job_metadata_key = kms.Key(
+            self, "JobMetadataKey",
+            alias="alias/{project_name}-job-metadata",
+            enable_key_rotation=True,
+        )
+        self.logs_key = kms.Key(
+            self, "LogsKey",
+            alias="alias/{project_name}-logs",
+            enable_key_rotation=True,
+        )
+        self.logs_key.grant_encrypt_decrypt(
+            iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")
+        )
+
+        # Permission boundary. Non-empty (CDK validates).
+        self.permission_boundary = iam.ManagedPolicy(
+            self, "WorkloadBoundary",
+            managed_policy_name="{project_name}-workload-boundary",
+            statements=[
+                iam.PolicyStatement(
+                    sid="AllowScopedByTag",
+                    effect=iam.Effect.ALLOW,
+                    actions=["*"], resources=["*"],
+                    conditions={"StringEquals": {"aws:ResourceTag/Project": "{project_name}"}},
                 ),
-                guardduty.CfnDetector.CFNFeatureConfigurationProperty(
-                    name="EKS_AUDIT_LOGS",
-                    status="DISABLED",  # Not using EKS
-                ),
-                guardduty.CfnDetector.CFNFeatureConfigurationProperty(
-                    name="LAMBDA_NETWORK_LOGS",
-                    status="ENABLED",
+                iam.PolicyStatement(
+                    sid="DenyIamAdmin", effect=iam.Effect.DENY,
+                    actions=["iam:CreateUser", "iam:CreateAccessKey", "iam:PutUserPolicy"],
+                    resources=["*"],
                 ),
             ],
         )
 
-    # =========================================================================
-    # E) CLOUDTRAIL (API activity audit log)
-    # =========================================================================
+        for out in [
+            ("AudioDataKeyArn",    self.audio_data_key.key_arn),
+            ("JobMetadataKeyArn",  self.job_metadata_key.key_arn),
+            ("LogsKeyArn",         self.logs_key.key_arn),
+            ("BoundaryArn",        self.permission_boundary.managed_policy_arn),
+        ]:
+            cdk.CfnOutput(self, out[0], value=out[1])
+```
 
-    # S3 bucket for CloudTrail logs (separate from data bucket)
-    cloudtrail_bucket = s3.Bucket(
-        self, "CloudTrailBucket",
-        bucket_name=f"{{project_name}}-cloudtrail-{stage_name}-{self.account}",
-        block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-        encryption=s3.BucketEncryption.KMS,
-        encryption_key=self.kms_key,
-        versioned=True,
-        lifecycle_rules=[
-            s3.LifecycleRule(
-                id="RetainAuditLogs",
-                enabled=True,
-                expiration=Duration.days(365 * 7),  # 7 years retention (HIPAA)
-                transitions=[
-                    s3.Transition(
-                        storage_class=s3.StorageClass.INTELLIGENT_TIERING,
-                        transition_after=Duration.days(90),
-                    ),
-                ],
-            )
-        ],
-        removal_policy=RemovalPolicy.RETAIN,  # Always retain audit logs
-        object_lock_enabled=stage_name == "prod",
-    )
+### 4.2 Downstream usage — identity-side KMS grants
 
-    # CloudTrail trail — log ALL API calls (management + data events)
-    trail = cloudtrail.Trail(
-        self, "AuditTrail",
-        trail_name=f"{{project_name}}-audit-trail-{stage_name}",
-        bucket=cloudtrail_bucket,
+```python
+# In ComputeStack (or any consumer stack):
+def _kms_grant(fn, key, actions):
+    fn.add_to_role_policy(iam.PolicyStatement(actions=actions, resources=[key.key_arn]))
 
-        # Include data events (S3 object reads/writes, Lambda invocations)
-        # WARNING: This can generate large volumes of logs and increase cost
-        send_to_cloud_watch_logs=True,
-        cloud_watch_logs_retention=logs.RetentionDays.ONE_YEAR,
 
-        # Encrypt logs
-        encryption_key=self.kms_key,
+# DO THIS (identity policy on consumer role — no security-stack mutation)
+_kms_grant(self.upload_fn, audio_data_key, ["kms:Encrypt", "kms:GenerateDataKey"])
 
-        # Validate log integrity (detect tampering)
-        enable_file_validation=True,
+# DO NOT DO THIS across stacks
+# audio_data_key.grant_encrypt(self.upload_fn)   # auto-mutates SecurityStack → cycle
+```
 
-        # Include ALL regions (for CloudTrail completeness)
-        is_multi_region_trail=True if stage_name == "prod" else False,
-        include_global_service_events=True,
-    )
+**Why identity-side works:**
+- Consumer role's policy references `key.key_arn` (a string token, unidirectional reference)
+- The CMK's resource policy is not touched at all; keeps its default "account root full access"
+- CloudFormation deploys: SecurityStack first, consumer stack second, no back-edge
 
-    # Add data event selectors — log S3 object-level operations
-    trail.log_all_s3_data_events()
-    trail.log_all_lambda_data_events()
+**Why the CMK's default "root account full access" is fine:** the CMK policy allows any principal in the account that has `kms:*` permission via IAM. The consumer role's identity policy *is* that IAM grant. The key is only as permissive as what IAM allows for a given principal.
 
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
+### 4.3 Applying the permission boundary from consumers
 
-    CfnOutput(self, "KmsKeyArn",
-        value=self.kms_key.key_arn,
-        description="Master KMS key ARN",
-        export_name=f"{{project_name}}-kms-key-{stage_name}",
-    )
+```python
+# In ComputeStack __init__, after creating Lambda functions:
+for fn in [self.upload_fn, self.status_fn, self.processing_fn, ...]:
+    iam.PermissionsBoundary.of(fn.role).apply(permission_boundary)
+```
 
-    CfnOutput(self, "ExternalApiSecretArn",
-        value=self.external_api_secret.secret_arn,
-        description="External API credentials secret ARN",
-        export_name=f"{{project_name}}-external-api-secret-{stage_name}",
-    )
+### 4.4 Micro-stack gotchas
 
-    CfnOutput(self, "CloudTrailBucketName",
-        value=cloudtrail_bucket.bucket_name,
-        description="S3 bucket for CloudTrail audit logs",
-        export_name=f"{{project_name}}-cloudtrail-bucket-{stage_name}",
-    )
+- **`key.grant_decrypt(role)` across stacks** mutates the key's resource policy. Use identity-side.
+- **`bucket.grant_read(role)` when bucket is KMS-encrypted** ALSO auto-calls `encryption_key.grant_decrypt(role)` — same cycle. For cross-stack consumers, grant S3 actions AND KMS actions both identity-side.
+- **`environment_encryption=cross_stack_key` on a Lambda** auto-grants the Lambda service principal on the key — harmless intra-account but will add a stack dependency edge. Use the SAME key that's in a truly shared stack (or drop `environment_encryption` for POC).
+- **Empty `ManagedPolicy`** fails CDK validation. The permission boundary must have at least one statement.
+
+---
+
+## 5. Swap matrix
+
+| Trigger | Action |
+|---|---|
+| One CMK enough, POC with one stack | Monolith, 1 key fine |
+| Multiple data classes (audio vs metadata vs logs), shared between stacks | Micro-Stack with 3 CMKs |
+| `cdk synth` error: `Adding this dependency ... would create a cyclic reference` mentions a KMS key | Replace the offending `key.grant_*(role)` with identity-side `PolicyStatement` |
+| Regulated client (HIPAA, PCI) | Micro-Stack + CloudHSM-backed keys; see `COMPLIANCE_HIPAA_PCIDSS` |
+
+---
+
+## 6. Worked example
+
+```python
+def test_security_stack_creates_three_keys():
+    import aws_cdk as cdk
+    from aws_cdk.assertions import Template
+    from infrastructure.cdk.stacks.security_stack import SecurityStack
+
+    app = cdk.App()
+    env = cdk.Environment(account="000000000000", region="us-east-1")
+    sec = SecurityStack(app, env=env)
+
+    t = Template.from_stack(sec)
+    t.resource_count_is("AWS::KMS::Key", 3)
+    t.has_resource_properties("AWS::KMS::Key", {"EnableKeyRotation": True})
+    t.resource_count_is("AWS::IAM::ManagedPolicy", 1)  # boundary
+
+
+def test_consumer_does_not_mutate_security_stack():
+    """Key test — consumer stack must NOT add a resource policy statement to the CMK."""
+    import aws_cdk as cdk
+    from aws_cdk.assertions import Template, Match
+    from infrastructure.cdk.stacks.security_stack import SecurityStack
+    from infrastructure.cdk.stacks.compute_stack import ComputeStack
+
+    app = cdk.App()
+    env = cdk.Environment(account="000000000000", region="us-east-1")
+    sec = SecurityStack(app, env=env)
+    # ... instantiate ComputeStack consuming sec.audio_data_key ...
+
+    sec_template = Template.from_stack(sec)
+    # The KMS key policy should have ONE statement (root access) — no consumer role refs
+    sec_template.has_resource_properties("AWS::KMS::Key", {
+        "KeyPolicy": {"Statement": Match.array_with([Match.object_like({"Sid": Match.string_like_regexp(".*Root.*")})])}
+    })
 ```
 
 ---
 
-## Security Compliance Notes
+## 7. References
 
-| Control               | HIPAA            | SOC 2    | Implementation                       |
-| --------------------- | ---------------- | -------- | ------------------------------------ |
-| Encryption at rest    | Required         | Required | KMS CMK on all stores                |
-| Encryption in transit | Required         | Required | TLS 1.2+ enforced everywhere         |
-| Access logging        | Required         | Required | CloudTrail + API GW access logs      |
-| Audit trail           | Required (6yr)   | Required | DynamoDB audit table + CloudTrail    |
-| MFA                   | Required (admin) | Required | Cognito REQUIRED MFA                 |
-| Least privilege       | Required         | Required | CDK `grant_*` methods                |
-| Incident response     | Required         | Required | GuardDuty + SNS alarms               |
-| Backup and recovery   | Required         | Required | Aurora backup + PITR + S3 versioning |
+- `docs/template_params.md` — `TAGS`, key alias conventions
+- `docs/Feature_Roadmap.md` — SEC-01..SEC-14
+- Related SOPs: `LAYER_BACKEND_LAMBDA` (identity-side grant helpers), `COMPLIANCE_HIPAA_PCIDSS` (CloudHSM)
+
+---
+
+## 8. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Micro-Stack variant documents identity-side KMS grants as the cycle-free pattern. Added consumer-side non-mutation test. |
+| 1.0 | 2026-03-05 | Initial. |

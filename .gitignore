@@ -5,6 +5,10 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.claude/
+
+# Local run artifacts
+audit_stdout.log
 
 # Python
 __pycache__/

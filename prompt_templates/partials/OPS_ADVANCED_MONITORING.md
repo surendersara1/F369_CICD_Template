@@ -1,394 +1,255 @@
-# PARTIAL: Advanced Monitoring — CloudWatch Synthetics, Config, Backup, Cost
+# SOP — Advanced Ops (Synthetics, Config, Backup, Cost Anomaly)
 
-**Usage:** Referenced when SOW contains compliance, SLA monitoring, cost governance, or backup requirements.
-
----
-
-## CDK Code Block — Advanced Operations & Monitoring
-
-```python
-def _create_advanced_monitoring(self, stage_name: str) -> None:
-    """
-    Advanced operational monitoring beyond basic CloudWatch alarms.
-
-    Components:
-      A) CloudWatch Synthetics Canaries  — synthetic monitoring of endpoints
-      B) AWS Config Rules                — compliance posture + drift detection
-      C) AWS Backup                      — centralized backup policies (HIPAA/SOC2)
-      D) Cost Anomaly Detection          — automated cost spike alerting
-      E) SSM Parameter Store             — config values (cheaper than Secrets Manager)
-      F) CloudWatch Contributor Insights — high-cardinality traffic analysis
-    """
-
-    # =========================================================================
-    # A) CLOUDWATCH SYNTHETICS — Endpoint canary monitoring
-    # Runs headless browser tests against your URLs every N minutes
-    # =========================================================================
-
-    # Canary execution role
-    canary_role = iam.Role(
-        self, "CanaryRole",
-        assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-        managed_policies=[
-            iam.ManagedPolicy.from_aws_managed_policy_name("CloudWatchSyntheticsFullAccess"),
-        ],
-    )
-    self.data_bucket.grant_read_write(canary_role)  # Canary stores screenshots/artifacts
-
-    # API Health Canary — runs every 5 minutes, alerts if API returns non-200
-    api_canary = synthetics.CfnCanary(
-        self, "ApiHealthCanary",
-        name=f"{{project_name}}-api-health-{stage_name}",
-        artifact_s3_location=f"s3://{self.data_bucket.bucket_name}/canary-artifacts/api/",
-        execution_role_arn=canary_role.role_arn,
-        runtime_version="syn-nodejs-puppeteer-6.2",
-
-        schedule=synthetics.CfnCanary.ScheduleProperty(
-            expression="rate(5 minutes)",
-        ),
-
-        # Inline canary script
-        code=synthetics.CfnCanary.CodeProperty(
-            handler="index.handler",
-            script="""
-const synthetics = require('Synthetics');
-const log = require('SyntheticsLogger');
-
-const apiCanaryBlueprint = async function () {
-    const url = process.env.API_ENDPOINT + '/health';
-
-    const requestOptions = {
-        hostname: new URL(url).hostname,
-        path: new URL(url).pathname,
-        method: 'GET',
-        headers: { 'User-Agent': 'CloudWatch-Synthetics' },
-        protocol: 'https:',
-        port: 443,
-    };
-
-    await synthetics.executeHttpStep('Verify API Health', requestOptions, async function(res) {
-        if (res.statusCode !== 200) {
-            throw new Error(`Expected 200 but got ${res.statusCode}`);
-        }
-        const body = await new Promise((resolve) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => resolve(data));
-        });
-        const json = JSON.parse(body);
-        if (json.status !== 'healthy') {
-            throw new Error(`Health check returned status: ${json.status}`);
-        }
-    });
-};
-
-exports.handler = async () => { return await apiCanaryBlueprint(); };
-            """,
-        ),
-
-        run_config=synthetics.CfnCanary.RunConfigProperty(
-            timeout_in_seconds=60,
-            environment_variables={"API_ENDPOINT": "https://api.{{project_name}}.example.com"},
-        ),
-
-        # Only start canary in non-dev environments (save cost)
-        start_canary_after_creation=stage_name != "dev",
-
-        success_retention_period=30,
-        failure_retention_period=90,
-    )
-
-    # Alarm on canary failure
-    cw.Alarm(
-        self, "ApiCanaryAlarm",
-        alarm_name=f"{{project_name}}-api-canary-{stage_name}",
-        alarm_description="Synthetic API health check failing",
-        metric=cw.Metric(
-            namespace="CloudWatchSynthetics",
-            metric_name="SuccessPercent",
-            dimensions_map={"CanaryName": api_canary.name},
-            period=Duration.minutes(5),
-            statistic="Average",
-        ),
-        threshold=90,  # Alert if success rate drops below 90%
-        comparison_operator=cw.ComparisonOperator.LESS_THAN_THRESHOLD,
-        evaluation_periods=3,
-        treat_missing_data=cw.TreatMissingData.BREACHING,
-    ).add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    # =========================================================================
-    # B) AWS CONFIG — Compliance posture + drift detection
-    # Continuously evaluates resources against rules
-    # =========================================================================
-
-    if stage_name in ("staging", "prod"):
-
-        MANAGED_CONFIG_RULES = [
-            # Encryption rules
-            ("S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED", {}),
-            ("S3_BUCKET_SSL_REQUESTS_ONLY", {}),
-            ("RDS_STORAGE_ENCRYPTED", {}),
-            ("DYNAMODB_TABLE_ENCRYPTED_AT_REST", {}),
-            ("ENCRYPTED_VOLUMES", {}),
-
-            # Access control rules
-            ("S3_BUCKET_PUBLIC_READ_PROHIBITED", {}),
-            ("S3_BUCKET_PUBLIC_WRITE_PROHIBITED", {}),
-            ("IAM_PASSWORD_POLICY", {
-                "RequireUppercaseCharacters": "true",
-                "RequireLowercaseCharacters": "true",
-                "RequireSymbols": "true",
-                "RequireNumbers": "true",
-                "MinimumPasswordLength": "12",
-            }),
-            ("MFA_ENABLED_FOR_IAM_CONSOLE_ACCESS", {}),
-
-            # Logging rules
-            ("CLOUD_TRAIL_ENABLED", {}),
-            ("CLOUDWATCH_LOG_GROUP_ENCRYPTED", {}),
-
-            # Network rules
-            ("RESTRICTED_INCOMING_TRAFFIC", {"blockedPort1": "22", "blockedPort2": "3389"}),
-            ("VPC_DEFAULT_SECURITY_GROUP_CLOSED", {}),
-            ("VPC_FLOW_LOGS_ENABLED", {}),
-        ]
-
-        for rule_name, parameters in MANAGED_CONFIG_RULES:
-            config.ManagedRule(
-                self, f"ConfigRule{rule_name.replace('_','').title()[:20]}",
-                identifier=config.ManagedRuleIdentifiers.by_managed_rule_identifier(rule_name),
-                config_rule_name=f"{{project_name}}-{rule_name.lower().replace('_','-')}-{stage_name}",
-                input_parameters=parameters if parameters else None,
-            )
-
-    # =========================================================================
-    # C) AWS BACKUP — Centralized backup policy (HIPAA/SOC2 required)
-    # =========================================================================
-
-    # Backup vault (encrypted, with access policy)
-    backup_vault = backup.BackupVault(
-        self, "BackupVault",
-        backup_vault_name=f"{{project_name}}-vault-{stage_name}",
-        encryption_key=self.kms_key,
-
-        # Lock settings: prevent backup deletion for compliance
-        lock_configuration=backup.LockConfiguration(
-            min_retention=Duration.days(7),
-            max_retention=Duration.days(365 * 7),  # 7 years for HIPAA
-            change_timeout=Duration.days(3),        # 3-day cooling period before lock
-        ) if stage_name == "prod" else None,
-
-        removal_policy=RemovalPolicy.RETAIN if stage_name == "prod" else RemovalPolicy.DESTROY,
-    )
-
-    # Backup plan (schedule + retention rules)
-    backup_plan = backup.BackupPlan(
-        self, "BackupPlan",
-        backup_plan_name=f"{{project_name}}-backup-plan-{stage_name}",
-        backup_vault=backup_vault,
-        backup_plan_rules=[
-            # Daily backups — retained for 35 days
-            backup.BackupPlanRule(
-                rule_name="DailyBackup",
-                schedule_expression=events.Schedule.cron(hour="4", minute="0"),  # 4am UTC daily
-                delete_after=Duration.days(35),
-                move_to_cold_storage_after=Duration.days(30) if stage_name == "prod" else None,
-                recovery_point_tags={"Type": "Daily", "Project": "{{project_name}}"},
-            ),
-            # Weekly backups — retained for 1 year
-            backup.BackupPlanRule(
-                rule_name="WeeklyBackup",
-                schedule_expression=events.Schedule.cron(hour="5", minute="0", week_day="SUN"),
-                delete_after=Duration.days(365),
-                move_to_cold_storage_after=Duration.days(90),
-                recovery_point_tags={"Type": "Weekly"},
-            ),
-            # Monthly backups — retained for 7 years (HIPAA minimum 6 years)
-            backup.BackupPlanRule(
-                rule_name="MonthlyBackup",
-                schedule_expression=events.Schedule.cron(hour="6", minute="0", day="1"),
-                delete_after=Duration.days(365 * 7),
-                move_to_cold_storage_after=Duration.days(30),
-                recovery_point_tags={"Type": "Monthly"},
-            ),
-        ],
-    )
-
-    # Resources to back up — selection by tags
-    backup_plan.add_selection(
-        "TaggedResources",
-        resources=[
-            backup.BackupResource.from_tag("Project", "{{project_name}}"),
-            backup.BackupResource.from_tag("Environment", stage_name),
-        ],
-        backup_selection_name=f"{{project_name}}-all-resources-{stage_name}",
-        role=iam.Role.from_role_arn(
-            self, "BackupRole",
-            f"arn:aws:iam::{self.account}:role/AWSBackupDefaultServiceRole",
-            mutable=False,
-        ),
-    )
-
-    # =========================================================================
-    # D) COST ANOMALY DETECTION — Alert on unexpected spend spikes
-    # =========================================================================
-
-    # Cost anomaly monitor + subscription (email alert when spend spikes)
-    anomaly_monitor = ce.CfnAnomalyMonitor(
-        self, "CostAnomalyMonitor",
-        monitor_name=f"{{project_name}}-cost-monitor-{stage_name}",
-        monitor_type="DIMENSIONAL",
-        monitor_dimension="SERVICE",  # Monitor by AWS service
-    )
-
-    ce.CfnAnomalySubscription(
-        self, "CostAnomalyAlert",
-        subscription_name=f"{{project_name}}-cost-alerts-{stage_name}",
-        monitor_arn_list=[anomaly_monitor.attr_monitor_arn],
-
-        # Alert when anomaly exceeds $50 or 50% above expected
-        threshold_expression= '{ "And": [{ "Dimensions": { "Key": "ANOMALY_TOTAL_IMPACT_ABSOLUTE", "MatchOptions": ["GREATER_THAN_OR_EQUAL"], "Values": ["50"] } }] }',
-
-        subscribers=[
-            ce.CfnAnomalySubscription.SubscriberProperty(
-                address="devops@example.com",  # [Claude: replace with Architecture Map owner email]
-                type="EMAIL",
-                status="CONFIRMED",
-            ),
-            ce.CfnAnomalySubscription.SubscriberProperty(
-                address=self.alert_topic.topic_arn,
-                type="SNS",
-                status="CONFIRMED",
-            ),
-        ],
-        frequency="DAILY",
-    )
-
-    # =========================================================================
-    # E) SSM PARAMETER STORE — Non-secret config values
-    # Much cheaper than Secrets Manager for non-sensitive config
-    # (~$0.05/10k API calls vs $0.40/secret/month)
-    # =========================================================================
-
-    # Store non-sensitive config: feature flags, limits, URLs
-    ssm.StringParameter(
-        self, "ApiEndpointParam",
-        parameter_name=f"/{{project_name}}/{stage_name}/config/api_endpoint",
-        string_value=self.rest_api.url if hasattr(self, 'rest_api') else "PLACEHOLDER",
-        description="API Gateway endpoint URL",
-        tier=ssm.ParameterTier.STANDARD,  # Free tier (up to 4KB)
-    )
-
-    ssm.StringParameter(
-        self, "FeatureFlagsParam",
-        parameter_name=f"/{{project_name}}/{stage_name}/config/feature_flags",
-        string_value='{"new_dashboard": false, "bulk_export": true}',
-        description="Feature flag configuration (JSON)",
-        tier=ssm.ParameterTier.STANDARD,
-    )
-
-    # Grant Lambda to read SSM parameters (much cheaper: GetParameters by path)
-    ssm_read_policy = iam.PolicyStatement(
-        actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
-        resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/{{project_name}}/{stage_name}/*"],
-    )
-    for fn in self.lambda_functions.values():
-        fn.add_to_role_policy(ssm_read_policy)
-
-    # =========================================================================
-    # F) CLOUDWATCH CONTRIBUTOR INSIGHTS — Top-N traffic analysis
-    # See which API paths, users, or IPs generate the most traffic
-    # =========================================================================
-
-    # Contributor Insights on DynamoDB (identifies hot partition keys)
-    cw.CfnInsightRule(
-        self, "DynamoHotKeysRule",
-        rule_name=f"{{project_name}}-dynamo-hot-keys-{stage_name}",
-        rule_body=json.dumps({
-            "Schema": {"Name": "CloudWatchLogRule", "Version": 1},
-            "AggregateOn": "Count",
-            "Contribution": {
-                "Filters": [{"Match": "$.eventSource", "In": ["dynamodb.amazonaws.com"]}],
-                "Keys": ["$.requestParameters.tableName", "$.requestParameters.key.pk.S"],
-            },
-            "LogGroupNames": [f"/{{project_name}}/{stage_name}/*"],
-        }),
-        rule_state="ENABLED",
-    )
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "BackupVaultName",
-        value=backup_vault.backup_vault_name,
-        description="AWS Backup vault name",
-        export_name=f"{{project_name}}-backup-vault-{stage_name}",
-    )
-```
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
 
-## DLQ Redrive Automation (Auto-recover failed messages)
+## 1. Purpose
+
+Production-grade ops primitives beyond the basic `LAYER_OBSERVABILITY`:
+
+- **CloudWatch Synthetics** — scheduled API probes (golden-path canaries)
+- **AWS Config** — resource compliance rules
+- **AWS Backup** — centralized backup plans for RDS + DDB
+- **Cost Anomaly Detection** — ML-based cost spike alerts
+- **CloudTrail Lake** — queryable audit trail (365-day default)
+- **Log archive** — long retention via Firehose → S3 Glacier
+
+Include when SOW contains: SLA, compliance, backup retention, cost governance, audit trail.
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| Single stack project | **§3 Monolith Variant** |
+| Dedicated `RecoveryStack` + `GovernanceStack` + `CostStack` | **§4 Micro-Stack Variant** |
+
+No cycle risk — these services observe but don't mutate workloads.
+
+---
+
+## 3. Monolith Variant
+
+### 3.1 Synthetic canary — end-to-end health probe
 
 ```python
-def _create_dlq_redrive(self, stage_name: str) -> None:
-    """
-    Automatically redrive messages from DLQ back to source queue
-    after investigation window. Avoids manual operational toil.
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    aws_synthetics as synth,
+    aws_s3 as s3,
+)
 
-    Pattern:
-      CloudWatch alarm (DLQ > 0 for 1hr) → SNS → On-call engineer
-      Engineer investigates → Manual redrive via console OR automated Lambda
-    """
 
-    # Lambda to redrive DLQ → source queue (call this after investigation)
-    redrive_fn = _lambda.Function(
-        self, "DLQRedriveFn",
-        function_name=f"{{project_name}}-dlq-redrive-{stage_name}",
-        runtime=_lambda.Runtime.PYTHON_3_13,
+canary_artifacts = s3.Bucket(
+    self, "CanaryArtifacts",
+    bucket_name=f"{{project_name}}-canary-artifacts-{stage}",
+    removal_policy=cdk.RemovalPolicy.DESTROY,
+    auto_delete_objects=True,
+    block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+)
+
+synth.Canary(
+    self, "ApiHealthCanary",
+    canary_name=f"{{project_name}}-api-health-{stage}",
+    schedule=synth.Schedule.rate(Duration.minutes(5)),
+    test=synth.Test.custom(
+        code=synth.Code.from_asset("canaries/api_health"),
         handler="index.handler",
-        architecture=_lambda.Architecture.ARM_64,
-        code=_lambda.Code.from_inline("""
-import boto3, os, json, logging
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-sqs = boto3.client('sqs')
-
-def handler(event, context):
-    dlq_url = os.environ['DLQ_URL']
-    source_url = os.environ['SOURCE_QUEUE_URL']
-    max_messages = int(event.get('max_messages', 10))
-    redriven = 0
-
-    while redriven < max_messages:
-        resp = sqs.receive_message(QueueUrl=dlq_url, MaxNumberOfMessages=10, WaitTimeSeconds=1)
-        msgs = resp.get('Messages', [])
-        if not msgs:
-            break
-        for msg in msgs:
-            sqs.send_message(QueueUrl=source_url, MessageBody=msg['Body'],
-                           MessageAttributes=msg.get('MessageAttributes', {}))
-            sqs.delete_message(QueueUrl=dlq_url, ReceiptHandle=msg['ReceiptHandle'])
-            redriven += 1
-            logger.info(f"Redriven message {msg['MessageId']}")
-
-    return {"redriven": redriven}
-"""),
-        environment={
-            "DLQ_URL": self.dlq.queue_url,
-            "SOURCE_QUEUE_URL": self.main_queue.queue_url,
-        },
-        timeout=Duration.minutes(5),
-        tracing=_lambda.Tracing.ACTIVE,
-    )
-
-    # Permissions
-    self.dlq.grant_consume_messages(redrive_fn)
-    self.main_queue.grant_send_messages(redrive_fn)
-
-    CfnOutput(self, "DLQRedriveFunctionArn",
-        value=redrive_fn.function_arn,
-        description="Invoke this Lambda to redrive DLQ messages (after investigation)",
-    )
+    ),
+    runtime=synth.Runtime.SYNTHETICS_PYTHON_SELENIUM_4_1,
+    artifacts_bucket_location=synth.ArtifactsBucketLocation(bucket=canary_artifacts),
+    start_after_creation=True,
+    success_retention_period=Duration.days(7),
+    failure_retention_period=Duration.days(30),
+)
 ```
+
+### 3.2 AWS Config rules
+
+```python
+from aws_cdk import aws_config as config
+
+
+# Enable Config recorder (once per account per region)
+# Often pre-existing; CDK will reference existing via from_lookup if needed.
+
+config.ManagedRule(
+    self, "S3EncryptionRule",
+    identifier=config.ManagedRuleIdentifiers.S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED,
+    config_rule_name=f"{{project_name}}-s3-encryption",
+)
+config.ManagedRule(
+    self, "RdsEncryptionRule",
+    identifier=config.ManagedRuleIdentifiers.RDS_STORAGE_ENCRYPTED,
+)
+config.ManagedRule(
+    self, "LambdaPublicAccessRule",
+    identifier=config.ManagedRuleIdentifiers.LAMBDA_FUNCTION_PUBLIC_ACCESS_PROHIBITED,
+)
+```
+
+### 3.3 AWS Backup plan
+
+```python
+from aws_cdk import aws_backup as backup
+
+
+plan = backup.BackupPlan(
+    self, "BackupPlan",
+    backup_plan_name=f"{{project_name}}-backup-{stage}",
+    backup_plan_rules=[
+        backup.BackupPlanRule(
+            rule_name="DailyKeep30",
+            schedule_expression=events.Schedule.cron(hour="3", minute="0"),
+            delete_after=Duration.days(30),
+            start_window=Duration.hours(1),
+            completion_window=Duration.hours(4),
+        ),
+    ],
+)
+plan.add_selection(
+    "Selection",
+    resources=[
+        backup.BackupResource.from_rds_database_instance(self.rds_instance),
+        backup.BackupResource.from_dynamo_db_table(self.ddb_tables["jobs_ledger"]),
+    ],
+)
+```
+
+### 3.4 Cost Anomaly Detection
+
+```python
+from aws_cdk import aws_ce as ce
+
+
+monitor = ce.CfnAnomalyMonitor(
+    self, "CostAnomalyMonitor",
+    monitor_name=f"{{project_name}}-cost-monitor-{stage}",
+    monitor_type="DIMENSIONAL",
+    monitor_dimension="SERVICE",
+)
+ce.CfnAnomalySubscription(
+    self, "CostAnomalySubscription",
+    subscription_name=f"{{project_name}}-cost-alerts-{stage}",
+    monitor_arn_list=[monitor.attr_monitor_arn],
+    subscribers=[
+        ce.CfnAnomalySubscription.SubscriberProperty(
+            type="EMAIL", address="{owner_email}",
+        ),
+    ],
+    threshold=100,   # USD
+    frequency="DAILY",
+)
+```
+
+### 3.5 Monolith gotchas
+
+- **`synth.Code.from_asset(path)`** is CWD-relative; anchor to `__file__` if you run synth from CI.
+- **AWS Config recorder** is one-per-account-per-region; deploying a second in the same region fails. In micro-stack, put Config rules in a dedicated stack.
+- **Backup vault** encryption defaults to AWS-managed KMS; override with `encryption_key=` for CMK if compliance requires.
+
+---
+
+## 4. Micro-Stack Variant
+
+Split the services by stack concern:
+
+- `GovernanceStack` — Config rules, Security Hub, GuardDuty
+- `RecoveryStack` — Backup plans, PITR enablement, cross-region replication
+- `CostStack` — Budgets, Cost Anomaly, Savings Plans tracking
+- `SyntheticsStack` (optional) — CW Synthetics canaries
+
+All four read upstream ARNs (no mutation). Same code as §3, just factored.
+
+### 4.1 `GovernanceStack` skeleton
+
+```python
+import aws_cdk as cdk
+from aws_cdk import aws_config as config
+from constructs import Construct
+
+
+class GovernanceStack(cdk.Stack):
+    def __init__(self, scope: Construct, **kwargs) -> None:
+        super().__init__(scope, "{project_name}-governance", **kwargs)
+
+        for rule_id, mrid in [
+            ("S3Encryption",       config.ManagedRuleIdentifiers.S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED),
+            ("RdsEncryption",      config.ManagedRuleIdentifiers.RDS_STORAGE_ENCRYPTED),
+            ("LambdaPublicAccess", config.ManagedRuleIdentifiers.LAMBDA_FUNCTION_PUBLIC_ACCESS_PROHIBITED),
+            ("CloudTrailEnabled",  config.ManagedRuleIdentifiers.CLOUD_TRAIL_ENABLED),
+        ]:
+            config.ManagedRule(self, rule_id, identifier=mrid)
+```
+
+### 4.2 `RecoveryStack` skeleton
+
+```python
+import aws_cdk as cdk
+from aws_cdk import aws_backup as backup, aws_rds as rds, aws_dynamodb as ddb
+from aws_cdk.aws_events import Schedule
+from aws_cdk import Duration
+from constructs import Construct
+
+
+class RecoveryStack(cdk.Stack):
+    def __init__(
+        self, scope: Construct,
+        rds_instance: rds.IDatabaseInstance,
+        jobs_ledger: ddb.ITable,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, "{project_name}-recovery", **kwargs)
+
+        plan = backup.BackupPlan(self, "Plan",
+            backup_plan_rules=[backup.BackupPlanRule(
+                rule_name="DailyKeep30",
+                schedule_expression=Schedule.cron(hour="3", minute="0"),
+                delete_after=Duration.days(30),
+            )],
+        )
+        plan.add_selection("Selection",
+            resources=[
+                backup.BackupResource.from_rds_database_instance(rds_instance),
+                backup.BackupResource.from_dynamo_db_table(jobs_ledger),
+            ],
+        )
+```
+
+### 4.3 Micro-stack gotchas
+
+- **Config recorder is global-per-region** — if another team's stack already deploys it, reference via `from_lookup` or accept a circular failure on `cdk deploy` and manually resolve.
+- **Backup IAM role** — CDK creates one automatically; add the `AWSBackupServiceRolePolicyForBackup` managed policy ref if customizing.
+- **Cost Anomaly** L1 CfnAnomalyMonitor is the only option; no L2.
+
+---
+
+## 5. Worked example
+
+```python
+def test_recovery_stack_backs_up_rds_and_ddb():
+    # ... instantiate RecoveryStack ...
+    t = Template.from_stack(rec)
+    t.resource_count_is("AWS::Backup::BackupPlan", 1)
+    t.resource_count_is("AWS::Backup::BackupSelection", 1)
+```
+
+---
+
+## 6. References
+
+- `docs/Feature_Roadmap.md` — OBS-20 (canary), GOV-01..GOV-11, REC-01..REC-16, COST-01..COST-12
+- Related SOPs: `LAYER_OBSERVABILITY` (baseline), `SECURITY_WAF_SHIELD_MACIE` (threat detection)
+
+---
+
+## 7. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Dual-variant SOP. Split into Governance/Recovery/Cost/Synthetics stacks for micro-stack topologies. |
+| 1.0 | 2026-03-05 | Initial. |

@@ -1,40 +1,81 @@
-# PARTIAL: LLM Fine-Tuning Pipeline — LoRA/QLoRA on SageMaker
+# SOP — MLOps Pipeline: LLM Fine-Tuning (LoRA/QLoRA on SageMaker)
 
-**Usage:** Include when SOW mentions custom LLM, fine-tuning, domain-specific chatbot, RLHF, LoRA, QLoRA, instruction tuning, or adapting foundation models.
-
----
-
-## When to Fine-Tune vs RAG vs Prompt Engineering
-
-| Approach               | When to Use                                                | Cost                | Latency              |
-| ---------------------- | ---------------------------------------------------------- | ------------------- | -------------------- |
-| **Prompt Engineering** | Model already knows the domain, just needs guidance        | $ (free)            | Same                 |
-| **RAG**                | Private docs/knowledge the model doesn't know              | $$                  | +100-500ms retrieval |
-| **Fine-Tuning (LoRA)** | Custom tone/style, domain vocabulary, task-specific format | $$$ (training cost) | Same as base         |
-| **Full Fine-Tuning**   | Maximum performance, large budget, proprietary data        | $$$$ (GPU hours)    | Same as base         |
-
-**Rule of thumb:** Try RAG first. Fine-tune if RAG accuracy < 80% or you need custom behavior the model can't learn from context.
+**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Applies to:** AWS CDK v2 (Python 3.12+) · SageMaker Pipelines · Hugging Face DLC (transformers 4.36 + PEFT + TRL) · LoRA / QLoRA 4-bit · GPU training (g5 / p4d) · Model Registry with manual-approval gate
 
 ---
 
-## What LoRA/QLoRA Is (Simply)
+## 1. Purpose
+
+- Provision a LoRA/QLoRA LLM fine-tuning pipeline: data prep → Hugging Face SFT training (Spot GPU + checkpoints) → eval → ROUGE-L quality gate → Model Registry with `PendingManualApproval`.
+- Codify GPU instance selection by model size (7B → `ml.g5.2xlarge` LoRA bf16; 70B → `ml.p4d.24xlarge` QLoRA 4-bit) so Claude picks the right GPU class per SOW.
+- Codify the trigger Lambda — single entry point that starts the pipeline with base-model ID, dataset URI, LoRA rank/alpha, epochs, LR.
+- Codify the training-script skeleton (`ml/scripts/llm_train_lora.py`): PEFT LoRA config, `prepare_model_for_kbit_training`, `SFTTrainer` from TRL, `merge_and_unload` to produce a standalone model.
+- Include when the SOW mentions custom LLM, fine-tuning, domain-specific chatbot, RLHF, LoRA, QLoRA, instruction tuning, or adapting foundation models.
+
+**When to fine-tune vs RAG vs prompt engineering:**
+
+| Approach | When to use | Cost | Latency |
+|---|---|---|---|
+| Prompt engineering | Model already knows the domain | $ (free) | Same |
+| RAG | Private docs the model doesn't know | $$ | +100–500 ms retrieval |
+| Fine-tuning (LoRA) | Custom tone/style, domain vocab, task format | $$$ (training) | Same as base |
+| Full fine-tuning | Max performance, large budget, proprietary data | $$$$ (GPU hours) | Same as base |
+
+Rule of thumb: try RAG first. Fine-tune if RAG accuracy < 80% or you need custom behaviour the model can't learn from context.
+
+---
+
+## 2. Decision — Monolith vs Micro-Stack
+
+| You are… | Use variant |
+|---|---|
+| Single stack owns Model Group + trigger Lambda + pipeline definition + lake bucket read | **§3 Monolith Variant** |
+| `MLPlatformStack` owns Model Group + SageMaker role, `DataLakeStack` owns training dataset bucket, `LLMFineTuningStack` owns trigger Lambda + schedule | **§4 Micro-Stack Variant** |
+
+**Why the split matters.** The trigger Lambda needs `sagemaker:StartPipelineExecution` on the fine-tuning pipeline (owned by `MLPlatformStack`) and `secretsmanager:GetSecretValue` on the HuggingFace token secret. The pipeline itself needs S3 read on the dataset bucket (owned by `DataLakeStack`) and write to checkpoint/model buckets. Monolith: local L2 grants are safe. Micro-stack: cross-stack `bucket.grant_*` on lake buckets would cycle; use identity-side on the SageMaker role and SSM-published ARNs. KMS on Feature Store / model artifacts follows the fifth non-negotiable (ARN strings, not construct refs).
+
+---
+
+## 3. Monolith Variant
+
+**Use when:** POC / single stack that also owns Studio and Feature Store.
+
+### 3.1 Architecture
 
 ```
-Full Fine-Tuning: Update ALL 7B parameters → expensive
-LoRA:            Freeze base model, train tiny adapter matrices (0.1% of params) → cheap
-QLoRA:           LoRA + 4-bit quantization → train 70B models on a single A100
+TRIGGER:
+  EventBridge / API / Lambda → LLMFineTuningTrigger Lambda
+    └── sagemaker:StartPipelineExecution(pipeline_name, params)
 
-Result: Same quality as full fine-tuning, 10-100x cheaper
+PIPELINE (ml/pipelines/llm_finetuning_pipeline.py):
+  1) PrepareFineTuningData  (SKLearnProcessor → Alpaca JSONL train/eval)
+  2) LoRAFineTuning          (HuggingFace DLC, Spot GPU, checkpoints, merge_weights=True)
+  3) EvaluateFineTunedModel  (ROUGE-L, BLEU, perplexity)
+  4) QualityGate             (ConditionGreaterThanOrEqualTo on MinEvalScore)
+  5) RegisterFineTunedModel  (ModelPackageGroup, PendingManualApproval)
+
+APPROVAL:
+  Model Registry: Pending → Approved
+  └── EventBridge rule → MLOPS_SAGEMAKER_SERVING deployer Lambda
 ```
 
----
-
-## CDK Code Block — LLM Fine-Tuning Infrastructure
+### 3.2 CDK — `_create_llm_finetuning_pipeline` method body
 
 ```python
+from aws_cdk import (
+    CfnOutput, Duration,
+    aws_iam as iam,
+    aws_lambda as _lambda,
+    aws_sagemaker as sagemaker,
+)
+
+
 def _create_llm_finetuning_pipeline(self, stage_name: str) -> None:
     """
     LLM Fine-Tuning Pipeline using LoRA/QLoRA on SageMaker.
+
+    Assumes self.{lake_buckets, sagemaker_role, model_package_groups, kms_key} set.
 
     Supported base models (set in Architecture Map):
       - meta-llama/Llama-3.1-8B-Instruct     (best quality/cost balance)
@@ -44,15 +85,13 @@ def _create_llm_finetuning_pipeline(self, stage_name: str) -> None:
       - HuggingFace Hub any model            (set in pipeline params)
 
     Pipeline Steps:
-      1. Data Preparation   — Format raw data into instruction-tuning JSONL
+      1. Data Preparation    — Format raw data into instruction-tuning JSONL
       2. LoRA/QLoRA Training — Fine-tune on SageMaker with Hugging Face DLC
-      3. Model Merge        — Merge LoRA adapters into base model weights
-      4. Evaluation         — BLEU, ROUGE, perplexity, custom task accuracy
-      5. Safety Check       — Run Perspective API / Guardrails eval
-      6. Register           — Push to Model Registry + HuggingFace Hub (optional)
+      3. Model Merge         — Merge LoRA adapters into base model weights
+      4. Evaluation          — BLEU, ROUGE, perplexity, custom task accuracy
+      5. Safety Check        — Run Perspective API / Guardrails eval
+      6. Register            — Push to Model Registry + HuggingFace Hub (optional)
     """
-
-    import aws_cdk.aws_sagemaker as sagemaker
 
     # =========================================================================
     # FINE-TUNING JOB CONFIGURATION
@@ -63,7 +102,7 @@ def _create_llm_finetuning_pipeline(self, stage_name: str) -> None:
         "7b":  {"instance": "ml.g5.2xlarge",  "count": 1, "method": "LoRA",  "quantization": "bf16"},
         "13b": {"instance": "ml.g5.12xlarge", "count": 1, "method": "LoRA",  "quantization": "bf16"},
         "34b": {"instance": "ml.g5.48xlarge", "count": 1, "method": "QLoRA", "quantization": "4bit"},
-        "70b": {"instance": "ml.p4d.24xlarge","count": 1, "method": "QLoRA", "quantization": "4bit"},
+        "70b": {"instance": "ml.p4d.24xlarge", "count": 1, "method": "QLoRA", "quantization": "4bit"},
     }
 
     # [Claude: detect model size from SOW and select GPU config]
@@ -80,29 +119,54 @@ def _create_llm_finetuning_pipeline(self, stage_name: str) -> None:
         runtime=_lambda.Runtime.PYTHON_3_13,
         architecture=_lambda.Architecture.ARM_64,
         handler="index.handler",
-        code=_lambda.Code.from_inline("""
-import boto3, os, json, logging
+        code=_lambda.Code.from_asset("lambda/llm_finetune_trigger"),
+        environment={
+            "PIPELINE_NAME": f"{{project_name}}-llm-finetune-{stage_name}",
+            "DEFAULT_BASE_MODEL": "meta-llama/Llama-3.1-8B-Instruct",
+            "DEFAULT_DATASET_URI": f"s3://{self.lake_buckets['processed'].bucket_name}/training-data/llm/",
+            "DEFAULT_GPU_INSTANCE": gpu_config["instance"],
+        },
+        timeout=Duration.seconds(30),
+    )
+    finetuning_trigger_fn.add_to_role_policy(iam.PolicyStatement(
+        actions=["sagemaker:StartPipelineExecution"],
+        resources=[f"arn:aws:sagemaker:{self.region}:{self.account}:pipeline/{{project_name}}-llm-finetune-{stage_name}"],
+    ))
+
+    CfnOutput(self, "LLMFineTuningTriggerArn",
+        value=finetuning_trigger_fn.function_arn,
+        description="Lambda ARN to start LLM fine-tuning pipeline",
+        export_name=f"{{project_name}}-llm-finetune-trigger-{stage_name}",
+    )
+```
+
+### 3.3 Trigger handler (`lambda/llm_finetune_trigger/index.py`)
+
+```python
+"""Start LLM fine-tuning pipeline execution with LoRA hyperparameters."""
+import boto3, logging, os
 from datetime import datetime
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 sm = boto3.client('sagemaker')
 
+
 def handler(event, context):
-    pipeline_name = os.environ['PIPELINE_NAME']
-    base_model_id = event.get('base_model_id', os.environ['DEFAULT_BASE_MODEL'])
+    pipeline_name  = os.environ['PIPELINE_NAME']
+    base_model_id  = event.get('base_model_id',  os.environ['DEFAULT_BASE_MODEL'])
     dataset_s3_uri = event.get('dataset_s3_uri', os.environ['DEFAULT_DATASET_URI'])
 
     params = [
-        {"Name": "BaseModelId", "Value": base_model_id},
-        {"Name": "DatasetS3Uri", "Value": dataset_s3_uri},
-        {"Name": "LoRARank", "Value": str(event.get('lora_rank', 16))},
-        {"Name": "LoRaAlpha", "Value": str(event.get('lora_alpha', 32))},
-        {"Name": "Epochs", "Value": str(event.get('epochs', 3))},
-        {"Name": "LearningRate", "Value": str(event.get('learning_rate', '2e-4'))},
-        {"Name": "BatchSize", "Value": str(event.get('batch_size', 4))},
+        {"Name": "BaseModelId",         "Value": base_model_id},
+        {"Name": "DatasetS3Uri",        "Value": dataset_s3_uri},
+        {"Name": "LoRARank",            "Value": str(event.get('lora_rank', 16))},
+        {"Name": "LoRaAlpha",           "Value": str(event.get('lora_alpha', 32))},
+        {"Name": "Epochs",              "Value": str(event.get('epochs', 3))},
+        {"Name": "LearningRate",        "Value": str(event.get('learning_rate', '2e-4'))},
+        {"Name": "BatchSize",           "Value": str(event.get('batch_size', 4))},
         {"Name": "ModelApprovalStatus", "Value": "PendingManualApproval"},
-        {"Name": "RunId", "Value": datetime.utcnow().strftime('%Y%m%d-%H%M%S')},
+        {"Name": "RunId",               "Value": datetime.utcnow().strftime('%Y%m%d-%H%M%S')},
     ]
 
     resp = sm.start_pipeline_execution(
@@ -113,35 +177,24 @@ def handler(event, context):
     )
     logger.info(f"Started fine-tuning pipeline: {resp['PipelineExecutionArn']}")
     return {"pipeline_execution_arn": resp['PipelineExecutionArn']}
-"""),
-        environment={
-            "PIPELINE_NAME": f"{{project_name}}-llm-finetune-{stage_name}",
-            "DEFAULT_BASE_MODEL": "meta-llama/Llama-3.1-8B-Instruct",
-            "DEFAULT_DATASET_URI": f"s3://{self.lake_buckets['processed'].bucket_name}/training-data/llm/",
-        },
-        timeout=Duration.seconds(30),
-    )
-    finetuning_trigger_fn.add_to_role_policy(iam.PolicyStatement(
-        actions=["sagemaker:StartPipelineExecution"],
-        resources=[f"arn:aws:sagemaker:{self.region}:{self.account}:pipeline/{{project_name}}-llm-finetune-{stage_name}"],
-    ))
+```
 
-    # =========================================================================
-    # SAGEMAKER PIPELINE DEFINITION (saved to ml/pipelines/llm_finetuning_pipeline.py)
-    # Claude generates this in Pass 3
-    # =========================================================================
+### 3.4 Pipeline definition (`ml/pipelines/llm_finetuning_pipeline.py`)
 
-    # Pipeline Python code template:
-    PIPELINE_CODE = '''
+Not CDK — SageMaker SDK. The trigger Lambda above invokes it.
+
+```python
 # ml/pipelines/llm_finetuning_pipeline.py
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep, ProcessingInput, ProcessingOutput
 from sagemaker.workflow.model_step import ModelStep
 from sagemaker.workflow.parameters import ParameterString, ParameterInteger, ParameterFloat
 from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
 from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.huggingface import HuggingFace
 from sagemaker.sklearn.processing import SKLearnProcessor
+from sagemaker.inputs import TrainingInput
+
 
 def create_llm_finetuning_pipeline(sm_session, role_arn, pipeline_name, s3_bucket, model_package_group):
     # === Pipeline Parameters ===
@@ -262,7 +315,7 @@ def create_llm_finetuning_pipeline(sm_session, role_arn, pipeline_name, s3_bucke
 
     # === Step 4: Quality Gate ===
     accuracy_condition = ConditionGreaterThanOrEqualTo(
-        left=eval_step.properties.ProcessingOutputConfig.Outputs["eval_report"]...,
+        left=eval_step.properties.ProcessingOutputConfig.Outputs["eval_report"],
         right=min_eval_score,
     )
 
@@ -270,7 +323,6 @@ def create_llm_finetuning_pipeline(sm_session, role_arn, pipeline_name, s3_bucke
         name="RegisterFineTunedModel",
         model_approval_status=approval_status,
         model_package_group_name=model_package_group,
-        ...
     )
 
     condition_step = ConditionStep(
@@ -287,21 +339,9 @@ def create_llm_finetuning_pipeline(sm_session, role_arn, pipeline_name, s3_bucke
         steps=[data_prep_step, training_step, eval_step, condition_step],
         sagemaker_session=sm_session,
     )
-'''
-
-    # =========================================================================
-    # OUTPUTS
-    # =========================================================================
-    CfnOutput(self, "LLMFineTuningTriggerArn",
-        value=finetuning_trigger_fn.function_arn,
-        description="Lambda ARN to start LLM fine-tuning pipeline",
-        export_name=f"{{project_name}}-llm-finetune-trigger-{stage_name}",
-    )
 ```
 
----
-
-## Training Script Skeleton (`ml/scripts/llm_train_lora.py`)
+### 3.5 Training script (`ml/scripts/llm_train_lora.py`)
 
 ```python
 # ml/scripts/llm_train_lora.py
@@ -311,6 +351,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments,
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
 from trl import SFTTrainer
 import torch
+
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -327,6 +368,7 @@ def parse_args():
     p.add_argument("--merge_weights", type=bool, default=True)
     p.add_argument("--output_dir", type=str, default="/opt/ml/model")
     return p.parse_args()
+
 
 def main():
     args = parse_args()
@@ -409,6 +451,190 @@ def main():
     tokenizer.save_pretrained(args.output_dir)
     print("Training complete. Model saved.")
 
+
 if __name__ == "__main__":
     main()
 ```
+
+### 3.6 Monolith gotchas
+
+- **GPU Spot interruption loses training progress without checkpoints** — `checkpoint_s3_uri` + `checkpoint_local_path="/opt/ml/checkpoints"` is non-optional for multi-hour runs. `resume_from_checkpoint=os.path.exists(...)` lets the retry continue.
+- **`HUGGING_FACE_HUB_TOKEN`** for gated models (Llama 3.x, Mistral-Large) — store in Secrets Manager and inject via pipeline parameter, never inline.
+- **`merge_weights=True`** produces a standalone model (no adapter lookup at inference) — simpler deployment but ~2× the S3 artifact size. Keep the unmerged LoRA adapter as a separate artifact for model-zoo serving.
+- **`max_wait ≥ max_run`** is a Spot correctness constraint; exceed it and the training step fails immediately.
+- **`gradient_checkpointing=True` + 4-bit quant** is what lets a 7B QLoRA run fit on a single `ml.g5.2xlarge` (24 GB A10G). Disable either and OOM.
+- **`packing=True`** in `SFTTrainer` packs multiple short sequences per batch — 2–3× training throughput on instruction-tuning data.
+- **Safety / guardrails eval** is a separate processing step (not shown) — Perspective API or Amazon Comprehend toxicity before promoting to `Approved`.
+
+---
+
+## 4. Micro-Stack Variant
+
+**Use when:** `LLMFineTuningStack` is separate from `MLPlatformStack` (owns Model Package Group + SageMaker role) and `DataLakeStack` (owns dataset bucket + KMS).
+
+### 4.1 The five non-negotiables
+
+1. **Anchor Lambda assets** to `Path(__file__)` via `_LAMBDAS_ROOT`.
+2. **Never call `model_group.grant_*`** across stacks — identity-side `sagemaker:StartPipelineExecution` on the pipeline ARN (read from SSM).
+3. **Never target cross-stack queues** — not relevant here; the trigger is invoked via API/event.
+4. **Never split a bucket + OAC** — not relevant.
+5. **Never set `encryption_master_key=ext_key`** — the trigger Lambda is stateless; no local queues requiring a KMS construct ref. If a DLQ is added, use a local CMK.
+
+### 4.2 `LLMFineTuningStack`
+
+```python
+from pathlib import Path
+
+import aws_cdk as cdk
+from aws_cdk import (
+    Aws, Duration,
+    aws_iam as iam,
+    aws_lambda as _lambda,
+    aws_logs as logs,
+    aws_ssm as ssm,
+)
+from constructs import Construct
+
+_LAMBDAS_ROOT: Path = Path(__file__).resolve().parents[3] / "lambda"
+
+
+class LLMFineTuningStack(cdk.Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        stage_name: str,
+        pipeline_name_ssm: str,                    # /proj/ml/llm_pipeline_name
+        dataset_bucket_name_ssm: str,              # /proj/lake/processed_bucket
+        hf_token_secret_arn_ssm: str,              # /proj/ml/hf_token_secret_arn
+        permission_boundary: iam.IManagedPolicy,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, f"{{project_name}}-llm-finetune-{stage_name}", **kwargs)
+
+        pipeline_name   = ssm.StringParameter.value_for_string_parameter(self, pipeline_name_ssm)
+        dataset_bucket  = ssm.StringParameter.value_for_string_parameter(self, dataset_bucket_name_ssm)
+        hf_secret_arn   = ssm.StringParameter.value_for_string_parameter(self, hf_token_secret_arn_ssm)
+
+        # Trigger Lambda
+        log_group = logs.LogGroup(self, "TriggerLogs",
+            log_group_name=f"/aws/lambda/{{project_name}}-llm-finetune-trigger-{stage_name}",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+
+        trigger_fn = _lambda.Function(
+            self, "LLMFineTuningTriggerFn",
+            function_name=f"{{project_name}}-llm-finetune-trigger-{stage_name}",
+            runtime=_lambda.Runtime.PYTHON_3_13,
+            architecture=_lambda.Architecture.ARM_64,
+            handler="index.handler",
+            code=_lambda.Code.from_asset(str(_LAMBDAS_ROOT / "llm_finetune_trigger")),
+            timeout=Duration.seconds(30),
+            log_group=log_group,
+            environment={
+                "PIPELINE_NAME":        pipeline_name,
+                "DEFAULT_BASE_MODEL":   "meta-llama/Llama-3.1-8B-Instruct",
+                "DEFAULT_DATASET_URI":  f"s3://{dataset_bucket}/training-data/llm/",
+                "DEFAULT_GPU_INSTANCE": "ml.g5.2xlarge",
+            },
+        )
+
+        # Identity-side grant: start pipeline (cross-stack safe — ARN string)
+        trigger_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["sagemaker:StartPipelineExecution", "sagemaker:DescribePipelineExecution"],
+            resources=[f"arn:aws:sagemaker:{Aws.REGION}:{Aws.ACCOUNT_ID}:pipeline/{pipeline_name}"],
+        ))
+
+        # Identity-side grant: read HF token secret
+        trigger_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[hf_secret_arn],
+        ))
+
+        iam.PermissionsBoundary.of(trigger_fn.role).apply(permission_boundary)
+
+        cdk.CfnOutput(self, "LLMFineTuningTriggerArn",
+            value=trigger_fn.function_arn,
+            description="Lambda ARN to start LLM fine-tuning pipeline",
+            export_name=f"{{project_name}}-llm-finetune-trigger-{stage_name}",
+        )
+```
+
+### 4.3 Micro-stack gotchas
+
+- **Pipeline ARN is formatted, not read directly** — `arn:aws:sagemaker:{region}:{account}:pipeline/{pipeline_name}` where `pipeline_name` is an SSM token. Tokens are resolved at deploy time; don't call `.split()` on them in Python.
+- **Secrets Manager ARN scoping** — the `hf_secret_arn` is a full ARN including the random suffix; scope `GetSecretValue` to that exact ARN (not a wildcard).
+- **Pipeline definition lives in `MLPlatformStack`** (or is deployed via the SageMaker SDK in CI) — this stack only triggers, never defines.
+- **GPU quota** — new AWS accounts have `0` vCPU quota for `ml.p4d.24xlarge`; request quota increase before deploying 70B pipelines.
+
+---
+
+## 5. Swap matrix — when to switch variants
+
+| Trigger | Action |
+|---|---|
+| POC, one stack, one base model | §3 Monolith |
+| Production MSxx layout | §4 Micro-Stack |
+| Swap base model (Llama → Mistral) | Change `BaseModelId` pipeline parameter; no CDK change |
+| Scale up from 7B to 70B | Change GPU_CONFIGS key + request p4d quota |
+| Add RLHF (PPO stage) | Add a second training step after SFT; reuse checkpoint S3 URI |
+| Deploy via HuggingFace Hub (not SageMaker endpoint) | Replace ModelStep with an `hf_hub_push` processing step |
+| Move off Spot (SLA-bound retraining) | Set `use_spot_instances=False` + drop `max_wait` |
+
+---
+
+## 6. Worked example — LLMFineTuningStack synthesizes
+
+Save as `tests/sop/test_MLOPS_PIPELINE_LLM_FINETUNING.py`. Offline.
+
+```python
+"""SOP verification — LLMFineTuningStack synthesizes trigger Lambda + scoped IAM."""
+import aws_cdk as cdk
+from aws_cdk import aws_iam as iam
+from aws_cdk.assertions import Template
+
+
+def _env():
+    return cdk.Environment(account="000000000000", region="us-east-1")
+
+
+def test_llm_finetuning_stack():
+    app = cdk.App()
+    env = _env()
+    deps = cdk.Stack(app, "Deps", env=env)
+    boundary = iam.ManagedPolicy(deps, "Boundary",
+        statements=[iam.PolicyStatement(actions=["*"], resources=["*"])])
+
+    from infrastructure.cdk.stacks.llm_finetune_stack import LLMFineTuningStack
+    stack = LLMFineTuningStack(
+        app, stage_name="staging",
+        pipeline_name_ssm="/test/ml/llm_pipeline_name",
+        dataset_bucket_name_ssm="/test/lake/processed_bucket",
+        hf_token_secret_arn_ssm="/test/ml/hf_token_secret_arn",
+        permission_boundary=boundary, env=env,
+    )
+
+    t = Template.from_stack(stack)
+    t.resource_count_is("AWS::Lambda::Function", 1)
+    t.resource_count_is("AWS::Logs::LogGroup",   1)
+```
+
+---
+
+## 7. References
+
+- `docs/template_params.md` — `LLM_PIPELINE_NAME_SSM`, `HF_TOKEN_SECRET_ARN_SSM`, `LLM_DEFAULT_BASE_MODEL`, `LLM_GPU_INSTANCE`, `LLM_MIN_ROUGE_L`
+- `docs/Feature_Roadmap.md` — feature IDs `ML-40` (LLM fine-tuning pipeline), `ML-41` (LoRA / QLoRA), `ML-42` (HF DLC training)
+- Hugging Face on SageMaker: https://huggingface.co/docs/sagemaker/index
+- PEFT / LoRA: https://huggingface.co/docs/peft/index
+- TRL SFTTrainer: https://huggingface.co/docs/trl/sft_trainer
+- Related SOPs: `MLOPS_SAGEMAKER_TRAINING` (Model Group + Studio), `MLOPS_SAGEMAKER_SERVING` (deployer on approval), `MLOPS_DATA_PLATFORM` (dataset preparation), `LAYER_BACKEND_LAMBDA` (five non-negotiables), `LLMOPS_BEDROCK` (managed LLM alternative)
+
+---
+
+## 8. Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 2.0 | 2026-04-21 | Restructured to 8-section dual-variant SOP. Added Micro-Stack variant (§4) — `LLMFineTuningStack` reads pipeline name + dataset bucket + HF token secret ARN via SSM; identity-side `sagemaker:StartPipelineExecution` scoped to the pipeline ARN; identity-side `secretsmanager:GetSecretValue` scoped to the HF token secret. Extracted inline Lambda handler to `lambda/llm_finetune_trigger/` asset. Kept the full pipeline definition + training script. Added Swap matrix (§5), Worked example (§6), Gotchas. |
+| 1.0 | 2026-03-05 | Initial — LoRA/QLoRA fine-tuning pipeline, GPU configs by model size, trigger Lambda, HF DLC pipeline, PEFT training script. |
