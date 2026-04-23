@@ -22,6 +22,7 @@
 5. **No new partials.** Only rewrite the 37 listed in §2. Do not create new files beyond the scope.
 6. **No AI-invented CDK APIs.** Verify every class / method / kwarg via `awslabs.cdk-mcp-server` MCP before writing. If uncertain, write `TODO(verify): <what to check>` in the code and move on — never hallucinate.
 7. **Stop on ambiguity.** If an original partial is about a service you don't know well, write a stub with `## 1. Purpose` + `## 2. Decision` + a TODO note, and skip the code variants. Flag in the execution log.
+8. **Canonical-Copy Rule (MANDATORY — see §9 registry).** Before authoring any section that uses a CDK primitive, service API, or IAM-action pattern covered by a canonical partial listed in §9, you MUST open that partial and **copy the audited pattern verbatim** — including its exact constructor kwargs, ARN-building idioms, gotcha comments, and IAM action lists. **Do NOT re-derive from memory.** Previous audits have caught three separate instances (F001, F004, F2-01/02/03/11) where re-derivation from memory introduced schema hallucinations that synth-failed on first deploy. When in doubt: open the canonical partial, paste the pattern, adapt variable names only.
 
 ---
 
@@ -242,3 +243,65 @@ E:\NBS_Research_America\docs\prompts\audit_partials_v2.md
 with Opus 4.7 — but this time expanded to audit all 54 partials instead of the original 17. The audit prompt's §2 scope will need to be updated by the human before running.
 
 Good luck. Be rigorous. Flag uncertainty instead of guessing.
+
+---
+
+## 9. Canonical Partials Registry — COPY VERBATIM (do not re-derive)
+
+**This registry enforces Hard Rule #8.** If your new partial uses any of the primitives / services / patterns below, the listed canonical partial is the single source of truth. Open it, find the relevant §3.X code block, copy it verbatim into your new partial (adapting only variable names + logical IDs).
+
+The full navigable list lives at `prompt_templates/partials/README.md` — that document tracks audit status + fix history. This section is the short, scoped version for the authoring prompt.
+
+### How to use this table
+
+For each row:
+1. **Trigger** — the service, CDK construct, or pattern your new partial touches.
+2. **Canonical partial** — the audited reference. OPEN it.
+3. **Copy from** — the specific section(s) with the audited code.
+4. **Why (non-obvious)** — the gotcha that prior audits caught. Re-deriving from memory WILL re-introduce this bug.
+
+### The registry
+
+| Trigger | Canonical partial | Copy from | Why (non-obvious — audit-caught) |
+|---|---|---|---|
+| `aws_s3vectors.CfnVectorBucket` + `CfnIndex` | `DATA_S3_VECTORS.md` | §3.2 (monolith) + §4.2 (micro) | `CfnIndex` L1 does NOT expose `.attr_index_arn` — build via `Stack.of(self).format_arn(service="s3vectors", resource="bucket", resource_name=f"{bucket}/index/{index}")`. Metadata: only `non_filterable_metadata_keys` is declarable; filterable metadata is IMPLICIT (any key NOT in that list is queryable). `vector_bucket_arn=` (not `vector_bucket_name=`). [Audit: R3/F2-01, F2-02, F2-11] |
+| `aws_s3tables.CfnTableBucket` / `CfnTable` / `CfnNamespace` | `DATA_ICEBERG_S3_TABLES.md` | §3.2 (monolith) + §4.2 (micro) | Boto3 `s3tables` client is **management-plane only**. There is NO `put_table_data()`. Row writes go via Athena `INSERT INTO` (default in §3.4), pyiceberg + Iceberg REST catalog, Spark/EMR, or Firehose direct-to-Iceberg. IAM actions: `s3tables:GetTable`/`GetTableMetadataLocation`/`UpdateTableMetadataLocation` (not `PutTableData`). ARN shapes: namespace vs table scoped differently. [Audit: R3/F2-03] |
+| `aws_rds.DatabaseCluster` with `parameter_group=` | `DATA_AURORA_SERVERLESS_V2.md` | §3.2 | `rds.ParameterGroup` auto-binds as `DBClusterParameterGroup` when passed via `parameter_group=` to a `DatabaseCluster` (CDK auto-calls `bindToCluster()`). `shared_preload_libraries` IS applied at cluster level. If behaviour ever drifts, the L1 escape hatch `rds.CfnDBClusterParameterGroup` is the fallback. [Audit: R2/F008 — re-classified as false positive after this discovery] |
+| `aws_lakeformation.CfnDataLakeSettings` / `CfnPrincipalPermissions` / `CfnDataCellsFilter` | `DATA_LAKE_FORMATION.md` | §3.2 (monolith) + §4.2 (micro) | Use Gen-3 `CfnPrincipalPermissions` ONLY. Do NOT mix with legacy Gen-2 `CfnPermissions`. Audit fidelity breaks if both coexist. CI deploy role MUST be in the admin list BEFORE any other LF resource deploys (else rollback fails too). `CreateDatabase/TableDefaultPermissions=[]` + `mutation_type="REPLACE"` for enforced mode. [Canonical — first-author audited] |
+| `aws_glue.CfnDatabase` / `CfnTable` / `CfnCrawler` / `CfnCatalog` (federation) | `DATA_GLUE_CATALOG.md` | §3.2 + §4.2 | Column `comment` is the AI substrate — catalog-embeddings downstream embed this text. Write comments seriously. `classification=iceberg` + `table_type=ICEBERG` in `Parameters` (even when `TableType="EXTERNAL_TABLE"`). `Ref` on `CfnDatabase` returns the NAME. Glue federated catalogs entry keyed by bucket NAME, not ARN: `arn:aws:glue:<region>:<account>:database/s3tablescatalog/<bucket-name>/<namespace>`. [Canonical] |
+| `aws_athena.CfnWorkGroup` / `CfnNamedQuery` / `CfnPreparedStatement` | `DATA_ATHENA.md` | §3.2 + §4.2 | `enforce_workgroup_configuration=True` is mandatory for any prod workgroup. Engine v3 pin required for Iceberg DML. Result bucket MUST have 30-day expiry lifecycle + KMS encryption enforced at workgroup. `EXPLAIN (FORMAT JSON)` is the text-to-SQL pre-flight primitive (zero scan cost). [Canonical] |
+| `aws_lambda.Function` / `PythonFunction` base patterns | `LAYER_BACKEND_LAMBDA.md` | §4.1 (the 5 non-negotiables) | THIS is the structural exemplar. Every dual-variant partial's §4.1 echoes these 5 rules verbatim. Never skip. Always anchor entry via `Path(__file__).parent.parent / "lambda" / "..."`. |
+| Cross-stack EventBridge `Rule` + Lambda target | `EVENT_DRIVEN_PATTERNS.md` | §4 | L1 `events.CfnRule` with static-ARN target. Never pass L2 Lambda construct cross-stack. |
+| Cross-stack bucket + CloudFront OAC | `LAYER_FRONTEND.md` | §4 | Bucket + OAC + distribution live in the SAME stack. Never split. Consumers read the distribution domain via SSM + CloudFront origin access — not via direct bucket ARN. |
+| Bedrock `InvokeModel` + inference profile ARN | `LLMOPS_BEDROCK.md` | §3 | Claude 4.x requires **inference profile ARN** shape: `arn:aws:bedrock:<region>:<account>:inference-profile/us.anthropic.claude-sonnet-4-7-20260109-v1:0` — NOT the foundation-model ARN (that path works only for Titan/Nova embed models). |
+| AgentCore Runtime (`bedrock_agentcore_alpha` L2 + `CfnRuntime` L1) | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1 fallback) | Alpha module path: `aws_cdk.aws_bedrock_agentcore_alpha`. L1 path: `aws_cdk.aws_bedrockagentcore` (no underscore between words). BOTH are version-churny — pin alpha version + include L1 fallback. Primary CI ARN for system interpreter: `arn:aws:bedrock-agentcore:<region>:aws:code-interpreter/aws.codeinterpreter.v1`. [Audit: R2/F002, F003, F004] |
+| AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 | STM + LTM strategy selection; session-isolated by default. |
+| AgentCore Identity (OBO tokens) | `AGENTCORE_IDENTITY.md` | §3 | `GetWorkloadAccessToken` mints a per-caller token; tool Lambdas invoke WITH that token — NOT the supervisor's execution role. This is how LF enforcement propagates. |
+| AgentCore Browser Tool | `AGENTCORE_BROWSER_TOOL.md` | §3.2 + §3.2b | Alpha L2 + L1 fallback. `robots.txt` enforcement at tool invocation time (not just IAM). |
+| AgentCore Code Interpreter | `AGENTCORE_CODE_INTERPRETER.md` | §3.2 + §3.2b + §4.2 | Scoped ARN for system CI: `arn:aws:bedrock-agentcore:<region>:aws:code-interpreter/aws.codeinterpreter.v1`. NEVER `"*"` as the resource scope. [Audit: R2/F004] |
+| QuickSight `CfnDataSet` / `CfnTopic` / `CfnDashboard` + Embedding SDK | `MLOPS_QUICKSIGHT_Q.md` | §3.2 + §3.3 | `SemanticType.TypeName` is an ALL-CAPS enum (`CURRENCY`, `DATE`, `NUMBER`, `PERCENT`, `LOCATION`, etc.) — mixed-case rejected. `sub_type_name` for qualifiers (currency code etc.) — not `type_parameters`. Q Generative Capabilities is a SEPARATE SKU from QuickSight Enterprise (per-user monthly). [Audit: R3/F2-06] |
+| Strands Agents SDK | `STRANDS_AGENT_CORE.md` + `STRANDS_TOOLS.md` | §3 | PyPI package: `strands-agents` (hyphen). Python module: `strands` in SDK 1.x, `strands_agents` in older versions. **Pin the version**. `@tool` decorator (bare, not `@lambda_tool` unless that decorator is confirmed in the pinned version). [Audit: R3/F2-10 pending verify] |
+| RDS Zero-ETL Integration | `DATA_ZERO_ETL.md` | §3.2 + §3.4 | `rds.CfnIntegration` for Aurora/RDS → Redshift. DDB sources may use a different CFN type in newer regions — add `TODO(verify)`. Cluster params `rds.logical_replication=1` + `aurora.enhanced_binlog=1` are STATIC — require reboot. Target Redshift minimum 8 RPU + `enable_case_sensitive_identifier=true`. [Canonical, with known version drift] |
+| Catalog embeddings (3-level) | `PATTERN_CATALOG_EMBEDDINGS.md` | §3.2 + §4.2 | Fingerprint-diff refresh (SHA256 over `source_text + columns_json`). 3-pass discovery (db → table → column) with LF-Tag filter pushdown. PII-sanitised `source_text`. [Uses DATA_S3_VECTORS as its storage primitive — see that row first.] |
+| Multimodal embeddings | `PATTERN_MULTIMODAL_EMBEDDINGS.md` | §3.2 + §4.2 | Titan Multimodal G1 — text + image in the SAME 1024-dim cosine space (cross-modal search works). PDF → PyMuPDF page render + Textract OCR, dual-embed. EXIF strip + Rekognition face blur + Pillow resize. Separate raw + preview buckets (raw immutable, previews regenerable 180d). [Uses DATA_S3_VECTORS — see that row first.] |
+| Text-to-SQL agent | `PATTERN_TEXT_TO_SQL.md` | §3.2 + §3.3 + §4.2 | Four-phase: discover (PATTERN_CATALOG_EMBEDDINGS) → generate (Claude Sonnet 4.7) → preflight (EXPLAIN) → execute. Three safety gates: table allowlist, EXPLAIN + touched-table AST walk, LF runtime enforcement. Error-correction retry (3×). Per-caller DDB daily scan budget. [Canonical — audited R3] |
+| Enterprise chat router | `PATTERN_ENTERPRISE_CHAT_ROUTER.md` | §3.2 + §4.2 | Strands supervisor with 4 tools (SQL / discovery / doc-RAG / multimodal). API GW WebSocket streaming. AgentCore Memory + AgentCore Identity for OBO. Inline citations `[SQL-N] [DOC-N] [IMG-N]`. WebSocket authorizer import: `aws_cdk.aws_apigatewayv2_authorizers_alpha.WebSocketLambdaAuthorizer` (note `_alpha`). [Audit: R3/F2-04] |
+
+### Enforcement checklist (before committing a new partial)
+
+For each new partial you author, answer these questions in your execution log:
+
+1. Which rows in §9 does this partial's §3 / §4 touch?
+2. For each matched row: did I OPEN the canonical partial?
+3. For each matched row: did I COPY the pattern verbatim, or did I re-derive?
+4. If I re-derived, what was my reason? (Answer: there is no acceptable reason. Go back and copy.)
+
+A `git diff` of your new partial's §3/§4 against the canonical partial's §3/§4 should show primarily variable-name + logical-ID differences. If the diff shows structural differences (different kwargs, different ARN patterns, different IAM action lists), you re-derived — **STOP and re-copy**.
+
+### Maintenance
+
+When an audit finds a new gotcha in a canonical partial:
+1. Fix the canonical partial.
+2. Update the Registry row's "Why" column with the new finding + audit reference (`[Audit: R<N>/F<NNN>]`).
+3. Grep the partial library for the old pattern (`grep -r "old_pattern" prompt_templates/partials/`) and fix downstream partials in the same commit.
+4. Update `prompt_templates/partials/README.md` audit-status table.

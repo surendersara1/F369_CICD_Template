@@ -41,6 +41,18 @@ type prompt_templates\partials\_prompts\build_remaining_partials_v2.md | claude 
 
 ## Related
 
-- The 17 v2.0 partials themselves live one level up in `partials/*.md`
-- Originals (pre-rewrite) are at `../../partials_backup_2026-04-21/`
-- `LAYER_BACKEND_LAMBDA.md` is the canonical structural exemplar — both prompts reference it as ground truth
+- **[`../README.md`](../README.md)** — Partials library index + **Canonical Partials Registry** (the MUST-READ for any session authoring a new partial). Enforces the Canonical-Copy Rule that audits R1-R3 identified as the #1 source of schema-hallucination FAILs.
+- The 75 v2.0 partials themselves live one level up in `../partials/*.md`.
+- Originals (pre-rewrite) are at `../../partials_backup_2026-04-21/`.
+- `../LAYER_BACKEND_LAMBDA.md` is the canonical structural exemplar + the 5 non-negotiables — both prompts reference it as ground truth.
+- Audit reports: `../../../docs/audit_report_partials_v2*.md` (3 rounds to date).
+
+---
+
+## The Canonical-Copy Rule (MUST READ before authoring a new partial)
+
+Audit rounds R1-R3 all caught the same failure mode: **new partials re-deriving a primitive's pattern from memory instead of copying from an already-audited canonical partial**. Most recent example (R3, 2026-04-23): two Wave-2 partials fabricated a `filterable_metadata_keys` property on `AWS::S3Vectors::Index` that does not exist — even though `DATA_S3_VECTORS.md` (audited in R2) documents the correct schema.
+
+The rule is now enforced in `build_remaining_partials_v2.md §0 Hard Rule #8` and §9 Canonical Partials Registry. New sessions authoring partials MUST load that prompt + read §9 before touching code.
+
+The same registry lives in the canonical location at `../README.md` for anyone browsing the library directly.
