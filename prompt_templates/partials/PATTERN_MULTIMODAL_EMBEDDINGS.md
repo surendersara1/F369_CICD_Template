@@ -187,16 +187,15 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
         ),
     )
 
-    common_filter_keys = [
-        s3v.CfnIndex.MetadataKeyProperty(name="source_type",  type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="doc_id",       type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="page",         type="NUMBER"),
-        s3v.CfnIndex.MetadataKeyProperty(name="access_group", type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="uploaded_at",  type="NUMBER"),
-    ]
+    # Metadata model per S3 Vectors L1 (match DATA_S3_VECTORS §3.2):
+    # any key NOT in non_filterable_metadata_keys is implicitly queryable via
+    # QueryVectors.filter. Values are untyped JSON.
+    # Filterable keys (attached at PutVectors time, by convention):
+    #   source_type (TEXT), doc_id (TEXT), page (NUMBER),
+    #   access_group (TEXT), uploaded_at (NUMBER — epoch seconds)
     self.idx_image = s3v.CfnIndex(
         self, "IdxImage",
-        vector_bucket_name=self.mm_vector_bucket.attr_vector_bucket_name,
+        vector_bucket_arn=self.mm_vector_bucket.attr_vector_bucket_arn,
         index_name="images",
         data_type="float32",
         dimension=1024,
@@ -204,11 +203,10 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
         metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
             non_filterable_metadata_keys=["source_uri", "thumbnail_uri", "caption"],
         ),
-        filterable_metadata_keys=common_filter_keys,
     )
     self.idx_text = s3v.CfnIndex(
         self, "IdxText",
-        vector_bucket_name=self.mm_vector_bucket.attr_vector_bucket_name,
+        vector_bucket_arn=self.mm_vector_bucket.attr_vector_bucket_arn,
         index_name="text",
         data_type="float32",
         dimension=1024,
@@ -216,10 +214,28 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
         metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
             non_filterable_metadata_keys=["source_text", "source_uri"],
         ),
-        filterable_metadata_keys=common_filter_keys,
     )
     for idx in (self.idx_image, self.idx_text):
         idx.add_dependency(self.mm_vector_bucket)
+
+    # Build index ARNs — CfnIndex L1 does NOT expose .attr_index_arn.
+    # See DATA_S3_VECTORS §3.2.
+    self.idx_image_arn = Stack.of(self).format_arn(
+        service="s3vectors",
+        resource="bucket",
+        resource_name=(
+            f"{self.mm_vector_bucket.attr_vector_bucket_name}/index/"
+            f"{self.idx_image.index_name}"
+        ),
+    )
+    self.idx_text_arn = Stack.of(self).format_arn(
+        service="s3vectors",
+        resource="bucket",
+        resource_name=(
+            f"{self.mm_vector_bucket.attr_vector_bucket_name}/index/"
+            f"{self.idx_text.index_name}"
+        ),
+    )
 
     # D) DLQ for ingest (images can fail Textract, rate-limits, corrupt files).
     self.ingest_dlq = sqs.Queue(
@@ -247,8 +263,8 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
             "RAW_BUCKET":          self.raw_bucket.bucket_name,
             "PREVIEW_BUCKET":      self.preview_bucket.bucket_name,
             "VECTOR_BUCKET_NAME":  self.mm_vector_bucket.attr_vector_bucket_name,
-            "IDX_IMAGE_ARN":       self.idx_image.attr_index_arn,
-            "IDX_TEXT_ARN":        self.idx_text.attr_index_arn,
+            "IDX_IMAGE_ARN":       self.idx_image_arn,
+            "IDX_TEXT_ARN":        self.idx_text_arn,
             "EMBED_MODEL_ID":      "amazon.titan-embed-image-v1",
             "EMBED_DIM":           "1024",
             "TEXTRACT_MAX_PAGES":  "500",
@@ -281,7 +297,7 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
     self.ingest_image.add_to_role_policy(iam.PolicyStatement(
         actions=["s3vectors:PutVectors", "s3vectors:DeleteVectors",
                  "s3vectors:GetVectors", "s3vectors:QueryVectors"],
-        resources=[self.idx_image.attr_index_arn, self.idx_text.attr_index_arn],
+        resources=[self.idx_image_arn, self.idx_text_arn],
     ))
     self.ingest_image.add_to_role_policy(iam.PolicyStatement(
         actions=["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"],
@@ -314,8 +330,8 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
         memory_size=1024,
         timeout=Duration.seconds(30),
         environment={
-            "IDX_IMAGE_ARN":   self.idx_image.attr_index_arn,
-            "IDX_TEXT_ARN":    self.idx_text.attr_index_arn,
+            "IDX_IMAGE_ARN":   self.idx_image_arn,
+            "IDX_TEXT_ARN":    self.idx_text_arn,
             "EMBED_MODEL_ID":  "amazon.titan-embed-image-v1",
             "EMBED_DIM":       "1024",
             "PREVIEW_BUCKET":  self.preview_bucket.bucket_name,
@@ -323,7 +339,7 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
     )
     self.query_fn.add_to_role_policy(iam.PolicyStatement(
         actions=["s3vectors:QueryVectors", "s3vectors:GetVectors"],
-        resources=[self.idx_image.attr_index_arn, self.idx_text.attr_index_arn],
+        resources=[self.idx_image_arn, self.idx_text_arn],
     ))
     self.query_fn.add_to_role_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel"],
@@ -341,8 +357,8 @@ def _create_multimodal_embeddings(self, stage: str) -> None:
     # H) Outputs.
     CfnOutput(self, "MmRawBucket",      value=self.raw_bucket.bucket_name)
     CfnOutput(self, "MmPreviewBucket",  value=self.preview_bucket.bucket_name)
-    CfnOutput(self, "IdxImageArn",      value=self.idx_image.attr_index_arn)
-    CfnOutput(self, "IdxTextArn",       value=self.idx_text.attr_index_arn)
+    CfnOutput(self, "IdxImageArn",      value=self.idx_image_arn)
+    CfnOutput(self, "IdxTextArn",       value=self.idx_text_arn)
 ```
 
 ### 3.3 Ingest Lambda — Docker image contents
@@ -822,35 +838,42 @@ class MultimodalIndexStack(Stack):
                 sse_type="aws:kms", kms_key_arn=cmk.key_arn,
             ),
         )
-        common_filter_keys = [
-            s3v.CfnIndex.MetadataKeyProperty(name="source_type",  type="TEXT"),
-            s3v.CfnIndex.MetadataKeyProperty(name="doc_id",       type="TEXT"),
-            s3v.CfnIndex.MetadataKeyProperty(name="page",         type="NUMBER"),
-            s3v.CfnIndex.MetadataKeyProperty(name="access_group", type="TEXT"),
-            s3v.CfnIndex.MetadataKeyProperty(name="uploaded_at",  type="NUMBER"),
-        ]
+        # Filterable metadata keys attached at PutVectors (untyped JSON,
+        # implicitly queryable — no CfnIndex-level declaration needed):
+        #   source_type, doc_id, page, access_group, uploaded_at
         idx_image = s3v.CfnIndex(
             self, "IdxImage",
-            vector_bucket_name=vb.attr_vector_bucket_name,
+            vector_bucket_arn=vb.attr_vector_bucket_arn,
             index_name="images",
             data_type="float32", dimension=1024, distance_metric="cosine",
             metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
                 non_filterable_metadata_keys=["source_uri", "thumbnail_uri", "caption"],
             ),
-            filterable_metadata_keys=common_filter_keys,
         )
         idx_text = s3v.CfnIndex(
             self, "IdxText",
-            vector_bucket_name=vb.attr_vector_bucket_name,
+            vector_bucket_arn=vb.attr_vector_bucket_arn,
             index_name="text",
             data_type="float32", dimension=1024, distance_metric="cosine",
             metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
                 non_filterable_metadata_keys=["source_text", "source_uri"],
             ),
-            filterable_metadata_keys=common_filter_keys,
         )
         for i in (idx_image, idx_text):
             i.add_dependency(vb)
+
+        # Build index ARNs manually — CfnIndex L1 does NOT expose
+        # .attr_index_arn. See DATA_S3_VECTORS §3.2.
+        def _idx_arn(idx: s3v.CfnIndex) -> str:
+            return self.format_arn(
+                service="s3vectors",
+                resource="bucket",
+                resource_name=(
+                    f"{vb.attr_vector_bucket_name}/index/{idx.index_name}"
+                ),
+            )
+        idx_image_arn = _idx_arn(idx_image)
+        idx_text_arn  = _idx_arn(idx_text)
 
         # D) Ingest Docker Lambda
         dlq = sqs.Queue(
@@ -874,8 +897,8 @@ class MultimodalIndexStack(Stack):
                 "RAW_BUCKET":         raw.bucket_name,
                 "PREVIEW_BUCKET":     preview.bucket_name,
                 "VECTOR_BUCKET_NAME": vb.attr_vector_bucket_name,
-                "IDX_IMAGE_ARN":      idx_image.attr_index_arn,
-                "IDX_TEXT_ARN":       idx_text.attr_index_arn,
+                "IDX_IMAGE_ARN":      idx_image_arn,
+                "IDX_TEXT_ARN":       idx_text_arn,
                 "EMBED_MODEL_ID":     "amazon.titan-embed-image-v1",
                 "EMBED_DIM":          "1024",
                 "MAX_IMAGE_DIM_PX":   "2048",
@@ -884,7 +907,7 @@ class MultimodalIndexStack(Stack):
         raw.grant_read(ingest)
         preview.grant_write(ingest)
         for stmt in self._ingest_grants(cmk.key_arn,
-                                        [idx_image.attr_index_arn, idx_text.attr_index_arn]):
+                                        [idx_image_arn, idx_text_arn]):
             ingest.add_to_role_policy(stmt)
 
         # E) S3 → EB → Ingest rule (producer-side).
@@ -903,8 +926,8 @@ class MultimodalIndexStack(Stack):
         for name, value in (
             ("raw_bucket_name",     raw.bucket_name),
             ("preview_bucket_name", preview.bucket_name),
-            ("idx_image_arn",       idx_image.attr_index_arn),
-            ("idx_text_arn",        idx_text.attr_index_arn),
+            ("idx_image_arn",       idx_image_arn),
+            ("idx_text_arn",        idx_text_arn),
             ("cmk_arn",             cmk.key_arn),
             ("embed_model_id",      "amazon.titan-embed-image-v1"),
             ("embed_dim",           "1024"),
@@ -915,8 +938,8 @@ class MultimodalIndexStack(Stack):
                 string_value=value,
             )
 
-        CfnOutput(self, "IdxImageArn",     value=idx_image.attr_index_arn)
-        CfnOutput(self, "IdxTextArn",      value=idx_text.attr_index_arn)
+        CfnOutput(self, "IdxImageArn",     value=idx_image_arn)
+        CfnOutput(self, "IdxTextArn",      value=idx_text_arn)
         CfnOutput(self, "MmPreviewBucket", value=preview.bucket_name)
 
     def _ingest_grants(self, cmk_arn: str, index_arns: list[str]):

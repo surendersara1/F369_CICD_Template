@@ -130,11 +130,15 @@ from aws_cdk import (
     CfnOutput, Duration, RemovalPolicy, Stack,
     aws_apigatewayv2 as apigwv2,
     aws_apigatewayv2_integrations as apigwv2_int,
-    aws_apigatewayv2_authorizers as apigwv2_auth,
     aws_dynamodb as ddb,
     aws_iam as iam,
     aws_lambda as _lambda,
 )
+# WebSocket authorizer is in the `_alpha` package (churny — pin the
+# version in requirements). If you want to avoid the alpha dep entirely,
+# use `apigwv2.CfnAuthorizer` (L1, stable) as shown in the fallback at
+# the end of this section.
+from aws_cdk.aws_apigatewayv2_authorizers_alpha import WebSocketLambdaAuthorizer
 from aws_cdk.aws_lambda_python_alpha import PythonFunction
 
 
@@ -278,7 +282,7 @@ def _create_chat_router(self, stage: str) -> None:
             integration=apigwv2_int.WebSocketLambdaIntegration(
                 "ConnectInt", self.connect_fn,
             ),
-            authorizer=apigwv2_auth.WebSocketLambdaAuthorizer(
+            authorizer=WebSocketLambdaAuthorizer(
                 "WsAuth", self.authoriser_fn,
                 identity_source=["route.request.querystring.token"],
             ),

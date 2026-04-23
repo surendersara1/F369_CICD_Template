@@ -153,27 +153,22 @@ def _create_catalog_embeddings(self, stage: str) -> None:
     )
 
     # C) Three indexes — db, table, column. All 1024-dim cosine.
-    #    `non_filterable_metadata_keys=["source_text","fingerprint"]` stores
-    #    the raw embedded text + fingerprint for one-hop retrieval without
-    #    creating filter-table overhead.
-    base_filter_keys_db = [
-        s3v.CfnIndex.MetadataKeyProperty(name="database_name",   type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="domain",          type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="environment",     type="TEXT"),
-    ]
-    base_filter_keys_table = base_filter_keys_db + [
-        s3v.CfnIndex.MetadataKeyProperty(name="table_name",      type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="table_type",      type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="sensitivity",     type="TEXT"),
-    ]
-    base_filter_keys_column = base_filter_keys_table + [
-        s3v.CfnIndex.MetadataKeyProperty(name="column_name",     type="TEXT"),
-        s3v.CfnIndex.MetadataKeyProperty(name="data_type",       type="TEXT"),
-    ]
-
+    #    Metadata model per S3 Vectors L1 (match DATA_S3_VECTORS §3.2):
+    #    - `NonFilterableMetadataKeys` lists keys stored alongside the vector
+    #      but NOT queryable via `QueryVectors.filter`. Use for bulky values
+    #      (source_text, fingerprint, columns_json).
+    #    - Every OTHER metadata key attached at `PutVectors` time is
+    #      AUTOMATICALLY filterable. Values are untyped JSON (strings,
+    #      numbers, arrays) — no schema, no per-key TEXT/NUMBER declaration.
+    #    The filterable keys this index uses at query time are, by convention:
+    #      db index:     database_name, domain, environment
+    #      table index:  database_name, table_name, table_type,
+    #                    domain, sensitivity, environment
+    #      column index: database_name, table_name, column_name, data_type,
+    #                    domain, sensitivity, environment
     self.idx_db = s3v.CfnIndex(
         self, "IdxDbLevel",
-        vector_bucket_name=self.vector_bucket.attr_vector_bucket_name,
+        vector_bucket_arn=self.vector_bucket.attr_vector_bucket_arn,
         index_name="catalog-db-level",
         data_type="float32",
         dimension=1024,
@@ -181,11 +176,10 @@ def _create_catalog_embeddings(self, stage: str) -> None:
         metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
             non_filterable_metadata_keys=["source_text", "fingerprint"],
         ),
-        filterable_metadata_keys=base_filter_keys_db,
     )
     self.idx_table = s3v.CfnIndex(
         self, "IdxTableLevel",
-        vector_bucket_name=self.vector_bucket.attr_vector_bucket_name,
+        vector_bucket_arn=self.vector_bucket.attr_vector_bucket_arn,
         index_name="catalog-table-level",
         data_type="float32",
         dimension=1024,
@@ -193,11 +187,10 @@ def _create_catalog_embeddings(self, stage: str) -> None:
         metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
             non_filterable_metadata_keys=["source_text", "fingerprint", "columns_json"],
         ),
-        filterable_metadata_keys=base_filter_keys_table,
     )
     self.idx_column = s3v.CfnIndex(
         self, "IdxColumnLevel",
-        vector_bucket_name=self.vector_bucket.attr_vector_bucket_name,
+        vector_bucket_arn=self.vector_bucket.attr_vector_bucket_arn,
         index_name="catalog-column-level",
         data_type="float32",
         dimension=1024,
@@ -205,10 +198,23 @@ def _create_catalog_embeddings(self, stage: str) -> None:
         metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
             non_filterable_metadata_keys=["source_text", "fingerprint"],
         ),
-        filterable_metadata_keys=base_filter_keys_column,
     )
     for idx in (self.idx_db, self.idx_table, self.idx_column):
         idx.add_dependency(self.vector_bucket)
+
+    # Build index ARNs manually — the L1 does not expose `.attr_index_arn`.
+    # Matches the canonical pattern in DATA_S3_VECTORS.md §3.2.
+    def _idx_arn(index: s3v.CfnIndex) -> str:
+        return Stack.of(self).format_arn(
+            service="s3vectors",
+            resource="bucket",
+            resource_name=(
+                f"{self.vector_bucket.attr_vector_bucket_name}/index/{index.index_name}"
+            ),
+        )
+    self.idx_db_arn     = _idx_arn(self.idx_db)
+    self.idx_table_arn  = _idx_arn(self.idx_table)
+    self.idx_column_arn = _idx_arn(self.idx_column)
 
     # D) DLQ for the refresh Lambda — catalog mutation events are loss-prone.
     self.refresh_dlq = sqs.Queue(
@@ -228,9 +234,9 @@ def _create_catalog_embeddings(self, stage: str) -> None:
         dead_letter_queue=self.refresh_dlq,
         environment={
             "VECTOR_BUCKET_NAME": self.vector_bucket.attr_vector_bucket_name,
-            "IDX_DB_ARN":         self.idx_db.attr_index_arn,
-            "IDX_TABLE_ARN":      self.idx_table.attr_index_arn,
-            "IDX_COLUMN_ARN":     self.idx_column.attr_index_arn,
+            "IDX_DB_ARN":         self.idx_db_arn,
+            "IDX_TABLE_ARN":      self.idx_table_arn,
+            "IDX_COLUMN_ARN":     self.idx_column_arn,
             "EMBEDDING_MODEL_ID": "amazon.titan-embed-text-v2:0",
             "EMBEDDING_DIM":      "1024",
         },
@@ -259,9 +265,9 @@ def _create_catalog_embeddings(self, stage: str) -> None:
         actions=["s3vectors:PutVectors", "s3vectors:DeleteVectors",
                  "s3vectors:GetVectors", "s3vectors:QueryVectors"],
         resources=[
-            self.idx_db.attr_index_arn,
-            self.idx_table.attr_index_arn,
-            self.idx_column.attr_index_arn,
+            self.idx_db_arn,
+            self.idx_table_arn,
+            self.idx_column_arn,
         ],
     ))
     self.refresh_fn.add_to_role_policy(iam.PolicyStatement(
@@ -295,9 +301,9 @@ def _create_catalog_embeddings(self, stage: str) -> None:
         memory_size=2048,
         environment={
             "VECTOR_BUCKET_NAME": self.vector_bucket.attr_vector_bucket_name,
-            "IDX_DB_ARN":         self.idx_db.attr_index_arn,
-            "IDX_TABLE_ARN":      self.idx_table.attr_index_arn,
-            "IDX_COLUMN_ARN":     self.idx_column.attr_index_arn,
+            "IDX_DB_ARN":         self.idx_db_arn,
+            "IDX_TABLE_ARN":      self.idx_table_arn,
+            "IDX_COLUMN_ARN":     self.idx_column_arn,
             "EMBEDDING_MODEL_ID": "amazon.titan-embed-text-v2:0",
             "EMBEDDING_DIM":      "1024",
         },
@@ -328,9 +334,9 @@ def _create_catalog_embeddings(self, stage: str) -> None:
             actions=["s3vectors:PutVectors", "s3vectors:DeleteVectors",
                      "s3vectors:GetVectors", "s3vectors:QueryVectors"],
             resources=[
-                self.idx_db.attr_index_arn,
-                self.idx_table.attr_index_arn,
-                self.idx_column.attr_index_arn,
+                self.idx_db_arn,
+                self.idx_table_arn,
+                self.idx_column_arn,
             ],
         ),
         iam.PolicyStatement(
@@ -374,9 +380,9 @@ def _create_catalog_embeddings(self, stage: str) -> None:
 
     # H) Outputs — cross-stack contract.
     CfnOutput(self, "CatalogVectorBucket", value=self.vector_bucket.attr_vector_bucket_name)
-    CfnOutput(self, "IdxDbArn",            value=self.idx_db.attr_index_arn)
-    CfnOutput(self, "IdxTableArn",         value=self.idx_table.attr_index_arn)
-    CfnOutput(self, "IdxColumnArn",        value=self.idx_column.attr_index_arn)
+    CfnOutput(self, "IdxDbArn",            value=self.idx_db_arn)
+    CfnOutput(self, "IdxTableArn",         value=self.idx_table_arn)
+    CfnOutput(self, "IdxColumnArn",        value=self.idx_column_arn)
     CfnOutput(self, "EmbeddingCmkArn",     value=self.embedding_cmk.key_arn)
     CfnOutput(self, "BulkReindexSfnArn",   value=self.bulk_sfn.state_machine_arn)
 ```
@@ -855,6 +861,11 @@ class CatalogEmbeddingStack(Stack):
         idx_table  = self._idx(vb, "IdxTableLevel",  "catalog-table-level",  level="table")
         idx_column = self._idx(vb, "IdxColumnLevel", "catalog-column-level", level="column")
 
+        # Build index ARNs — L1 does not expose .attr_index_arn.
+        idx_db_arn     = self._idx_arn(self, vb, idx_db)
+        idx_table_arn  = self._idx_arn(self, vb, idx_table)
+        idx_column_arn = self._idx_arn(self, vb, idx_column)
+
         # --- C) Refresh Lambda
         dlq = sqs.Queue(
             self, "RefreshDlq",
@@ -871,16 +882,16 @@ class CatalogEmbeddingStack(Stack):
             dead_letter_queue=dlq,
             environment={
                 "VECTOR_BUCKET_NAME": vb.attr_vector_bucket_name,
-                "IDX_DB_ARN":         idx_db.attr_index_arn,
-                "IDX_TABLE_ARN":      idx_table.attr_index_arn,
-                "IDX_COLUMN_ARN":     idx_column.attr_index_arn,
+                "IDX_DB_ARN":         idx_db_arn,
+                "IDX_TABLE_ARN":      idx_table_arn,
+                "IDX_COLUMN_ARN":     idx_column_arn,
                 "EMBEDDING_MODEL_ID": "amazon.titan-embed-text-v2:0",
                 "EMBEDDING_DIM":      "1024",
             },
         )
-        self._grant(refresh_fn.role, index_arns=[
-            idx_db.attr_index_arn, idx_table.attr_index_arn, idx_column.attr_index_arn,
-        ], cmk_arn=cmk.key_arn)
+        self._grant(refresh_fn.role,
+                    index_arns=[idx_db_arn, idx_table_arn, idx_column_arn],
+                    cmk_arn=cmk.key_arn)
 
         # --- D) EB rule (producer-side)
         events.Rule(
@@ -902,9 +913,9 @@ class CatalogEmbeddingStack(Stack):
             string_value=vb.attr_vector_bucket_name,
         )
         for name, arn in (
-            ("idx_db_arn",     idx_db.attr_index_arn),
-            ("idx_table_arn",  idx_table.attr_index_arn),
-            ("idx_column_arn", idx_column.attr_index_arn),
+            ("idx_db_arn",     idx_db_arn),
+            ("idx_table_arn",  idx_table_arn),
+            ("idx_column_arn", idx_column_arn),
             ("cmk_arn",        cmk.key_arn),
         ):
             ssm.StringParameter(
@@ -913,8 +924,8 @@ class CatalogEmbeddingStack(Stack):
                 string_value=arn,
             )
 
-        CfnOutput(self, "IdxTableArn",  value=idx_table.attr_index_arn)
-        CfnOutput(self, "IdxColumnArn", value=idx_column.attr_index_arn)
+        CfnOutput(self, "IdxTableArn",  value=idx_table_arn)
+        CfnOutput(self, "IdxColumnArn", value=idx_column_arn)
 
     # ---- helpers ----------------------------------------------------------
 
@@ -922,30 +933,15 @@ class CatalogEmbeddingStack(Stack):
         self, vb: s3v.CfnVectorBucket, logical_id: str,
         index_name: str, *, level: str,
     ) -> s3v.CfnIndex:
-        filter_keys = {
-            "db": [
-                ("database_name", "TEXT"),
-                ("domain",        "TEXT"),
-                ("environment",   "TEXT"),
-            ],
-            "table": [
-                ("database_name", "TEXT"), ("domain",      "TEXT"),
-                ("environment",   "TEXT"), ("table_name",  "TEXT"),
-                ("table_type",    "TEXT"), ("sensitivity", "TEXT"),
-            ],
-            "column": [
-                ("database_name", "TEXT"), ("domain",       "TEXT"),
-                ("environment",   "TEXT"), ("table_name",   "TEXT"),
-                ("table_type",    "TEXT"), ("sensitivity",  "TEXT"),
-                ("column_name",   "TEXT"), ("data_type",    "TEXT"),
-            ],
-        }[level]
+        # S3 Vectors: filterable metadata is IMPLICIT — any key NOT in
+        # non_filterable_metadata_keys is automatically queryable via
+        # QueryVectors.filter (untyped JSON values).
         non_filterable = ["source_text", "fingerprint"]
         if level == "table":
             non_filterable.append("columns_json")
         idx = s3v.CfnIndex(
             self, logical_id,
-            vector_bucket_name=vb.attr_vector_bucket_name,
+            vector_bucket_arn=vb.attr_vector_bucket_arn,
             index_name=index_name,
             data_type="float32",
             dimension=1024,
@@ -953,13 +949,21 @@ class CatalogEmbeddingStack(Stack):
             metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
                 non_filterable_metadata_keys=non_filterable,
             ),
-            filterable_metadata_keys=[
-                s3v.CfnIndex.MetadataKeyProperty(name=k, type=t)
-                for k, t in filter_keys
-            ],
         )
         idx.add_dependency(vb)
         return idx
+
+    @staticmethod
+    def _idx_arn(stack: Stack, vb: s3v.CfnVectorBucket, idx: s3v.CfnIndex) -> str:
+        # Build the index ARN manually — CfnIndex L1 does NOT expose
+        # .attr_index_arn (see DATA_S3_VECTORS §3.2).
+        return stack.format_arn(
+            service="s3vectors",
+            resource="bucket",
+            resource_name=(
+                f"{vb.attr_vector_bucket_name}/index/{idx.index_name}"
+            ),
+        )
 
     def _grant(self, role: iam.IRole, *, index_arns: list[str], cmk_arn: str) -> None:
         role.add_to_principal_policy(iam.PolicyStatement(

@@ -45,7 +45,7 @@ Micro-Stack variant fixes all of this by: (a) owning the table bucket + namespac
 ### 3.1 Architecture
 
 ```
-  Ingest Fn ──► s3tables.PutTableData (CSV/Parquet/JSON batch upload)
+  Ingest Fn ──► Athena `INSERT INTO` (or pyiceberg / Firehose / Spark)
                       │
                       ▼
   ┌──────────────────────────────────────────────────────────────┐
@@ -206,21 +206,52 @@ def _create_s3_tables(self, stage: str) -> None:
 ### 3.3 Identity-side grant on the same stack
 
 ```python
-def _grant_ingest_lambda_access(self, fn_role: iam.IRole) -> None:
-    """Grant the ingest Lambda write access to fact_revenue + dim_customer +
-    stg_event. Identity-side only — no bucket policy mutation."""
+def _grant_ingest_lambda_access(
+    self, fn_role: iam.IRole, athena_workgroup_name: str, results_bucket_name: str,
+) -> None:
+    """Grant the ingest Lambda access via the Athena INSERT path
+    (see §3.4). Identity-side only — no bucket policy mutation.
+
+    The Lambda uses Athena as the write engine; the table-level
+    authorization happens via Lake Formation at query time (see
+    DATA_LAKE_FORMATION). `s3tables:GetTableMetadataLocation` +
+    `UpdateTableMetadataLocation` are the metadata-path grants Athena
+    needs when it commits an Iceberg snapshot.
+    """
+    # Athena execute + result reads
     fn_role.add_to_principal_policy(iam.PolicyStatement(
         actions=[
-            "s3tables:PutTableData",
-            "s3tables:GetTableData",
+            "athena:StartQueryExecution",
+            "athena:GetQueryExecution",
+            "athena:GetQueryResults",
+            "athena:StopQueryExecution",
+        ],
+        resources=[
+            f"arn:aws:athena:{Stack.of(self).region}:"
+            f"{Stack.of(self).account}:workgroup/{athena_workgroup_name}",
+        ],
+    ))
+    fn_role.add_to_principal_policy(iam.PolicyStatement(
+        actions=["s3:GetBucketLocation", "s3:GetObject", "s3:PutObject",
+                 "s3:ListBucket"],
+        resources=[
+            f"arn:aws:s3:::{results_bucket_name}",
+            f"arn:aws:s3:::{results_bucket_name}/*",
+        ],
+    ))
+    # S3 Tables — Athena needs these to COMMIT the Iceberg snapshot after
+    # INSERT. These are the real GA IAM actions (not the PutTableData
+    # action hallucinated in an earlier revision of this partial).
+    fn_role.add_to_principal_policy(iam.PolicyStatement(
+        actions=[
             "s3tables:GetTableMetadataLocation",
             "s3tables:UpdateTableMetadataLocation",
             "s3tables:GetTable",
         ],
         resources=[
             self.fact_revenue.attr_table_arn,
-            # Add other tables explicitly — wildcard would grant all tables in
-            # all namespaces of the bucket.
+            # Add other tables explicitly — wildcard grants all tables in all
+            # namespaces of the bucket.
         ],
     ))
     fn_role.add_to_principal_policy(iam.PolicyStatement(
@@ -233,13 +264,13 @@ def _grant_ingest_lambda_access(self, fn_role: iam.IRole) -> None:
         actions=["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"],
         resources=[self.tables_cmk.key_arn],
     ))
-    # Glue Catalog federation is auto, but readers still need glue:GetDatabase
-    # + GetTable to resolve the federated catalog entry via Athena.
+    # Glue federation — Athena resolves the federated catalog entry via these.
     fn_role.add_to_principal_policy(iam.PolicyStatement(
         actions=[
             "glue:GetDatabase", "glue:GetDatabases",
             "glue:GetTable",    "glue:GetTables",
             "glue:GetPartitions",
+            "lakeformation:GetDataAccess",
         ],
         resources=[
             f"arn:aws:glue:{Stack.of(self).region}:{Stack.of(self).account}:catalog",
@@ -249,45 +280,94 @@ def _grant_ingest_lambda_access(self, fn_role: iam.IRole) -> None:
     ))
 ```
 
-### 3.4 Ingest Lambda — idempotent Parquet upload via boto3
+### 3.4 Ingest Lambda — Athena `INSERT INTO` (S3 Tables has no boto3 row-put API)
 
 ```python
 # lambda/ingest_revenue/handler.py
+"""
+S3 Tables row-data INSERT is NOT a single-shot boto3 call — the `s3tables`
+boto3 client is management-plane only (Create/Delete/Get/List Namespace +
+Table + Policy). Row-data writes go via one of:
+
+  (a) Athena `INSERT INTO`                 ← default, used here
+  (b) pyiceberg via the Iceberg REST catalog (lowest-latency per-row)
+  (c) Glue ETL / EMR Spark                 (bulk backfill)
+  (d) Firehose direct-to-Iceberg           (streaming)
+
+We use (a) because it requires no extra Lambda deps + matches the Athena
+workgroup pattern already in the kit (see DATA_ATHENA §3.4).
+
+event = {"rows": [{"order_id": 1, "customer_id": "c1", "ts": "2026-04-23T00:00:00Z",
+                   "amount": "100.00", "currency": "USD"}, ...]}
+"""
 import os
-import pyarrow as pa
-import pyarrow.parquet as pq
+import time
 import boto3
 
-TABLE_BUCKET_ARN = os.environ["TABLE_BUCKET_ARN"]
-NAMESPACE        = os.environ["NAMESPACE"]
-TABLE_NAME       = os.environ["TABLE_NAME"]
+DATABASE  = os.environ["DATABASE"]         # e.g. "lakehouse"
+NAMESPACE = os.environ["NAMESPACE"]        # Glue treats namespace as schema
+TABLE_NAME = os.environ["TABLE_NAME"]      # e.g. "fact_revenue"
+WORKGROUP = os.environ["WORKGROUP"]        # e.g. "lakehouse-ingest-prod"
+CATALOG   = os.environ["CATALOG"]          # e.g. "s3tablescatalog/<bucket>"
 
-s3t = boto3.client("s3tables")
+athena = boto3.client("athena")
+
+
+def _quote(v):
+    # Simple literal formatter. Production: use parameterised PreparedStatements
+    # (see DATA_ATHENA §3.2 `top_n_by_region`) for anything touching untrusted
+    # input — Athena's INSERT with VALUES does NOT support parameters, so build
+    # a CTAS-from-staging pattern if inputs are user-supplied.
+    if isinstance(v, (int, float)):
+        return str(v)
+    return "'" + str(v).replace("'", "''") + "'"
+
 
 def lambda_handler(event, _ctx):
-    """event = {"rows": [{"order_id": ..., "customer_id": ..., ...}]}"""
-    rows = event["rows"]
+    rows = event.get("rows", [])
     if not rows:
         return {"inserted": 0}
-    # Build an Arrow table in memory — S3 Tables accepts Parquet or CSV.
-    # For production, prefer Parquet: smaller, schema-embedded.
-    tbl = pa.Table.from_pylist(rows)
-    buf = pa.BufferOutputStream()
-    pq.write_table(tbl, buf)
-    data_bytes = buf.getvalue().to_pybytes()
 
-    # PutTableData appends a data file. The Iceberg commit (snapshot bump)
-    # happens server-side; the client sees an idempotency-safe overwrite on
-    # retry if the same `request_token` is used. The SDK adds a request_token
-    # automatically; pass one explicitly for at-least-once safety.
-    resp = s3t.put_table_data(
-        tableBucketARN=TABLE_BUCKET_ARN,
-        namespace=NAMESPACE,
-        name=TABLE_NAME,
-        format="PARQUET",
-        data=data_bytes,
+    # Sweet spot ~1-1000 rows per INSERT; beyond that, build a staging table +
+    # CTAS or use pyiceberg / Spark.
+    columns = ["order_id", "customer_id", "ts", "amount", "currency"]
+    values = ", ".join(
+        "(" + ", ".join(
+            f"TIMESTAMP {_quote(r[c])}" if c == "ts"
+            else f"DECIMAL {_quote(r[c])}" if c == "amount"
+            else _quote(r[c])
+            for c in columns
+        ) + ")"
+        for r in rows
     )
-    return {"inserted": len(rows), "snapshot_id": resp.get("snapshotId")}
+    sql = (
+        f"INSERT INTO \"{CATALOG}\".\"{NAMESPACE}\".\"{TABLE_NAME}\" "
+        f"({', '.join(columns)}) VALUES {values}"
+    )
+
+    exec_id = athena.start_query_execution(
+        QueryString=sql,
+        QueryExecutionContext={"Catalog": CATALOG, "Database": NAMESPACE},
+        WorkGroup=WORKGROUP,
+    )["QueryExecutionId"]
+
+    end = time.time() + 60
+    while time.time() < end:
+        q = athena.get_query_execution(QueryExecutionId=exec_id)["QueryExecution"]
+        st = q["Status"]["State"]
+        if st in ("SUCCEEDED", "FAILED", "CANCELLED"):
+            break
+        time.sleep(1)
+    if st != "SUCCEEDED":
+        raise RuntimeError(
+            f"Athena INSERT {exec_id} ended in {st}: "
+            f"{q['Status'].get('StateChangeReason','')}"
+        )
+    return {
+        "inserted": len(rows),
+        "exec_id":  exec_id,
+        "scanned_bytes": q.get("Statistics", {}).get("DataScannedInBytes", 0),
+    }
 ```
 
 ### 3.5 Query Lambda — Athena against the auto-federated catalog
@@ -485,8 +565,14 @@ class ComputeStack(Stack):
         cmk_arn = ssm.StringParameter.value_for_string_parameter(
             self, f"/{{project_name}}/{stage}/lakehouse/cmk_arn"
         )
+        athena_wg_name = ssm.StringParameter.value_for_string_parameter(
+            self, f"/{{project_name}}/{stage}/athena/workgroup_name"
+        )
+        athena_results_bucket = ssm.StringParameter.value_for_string_parameter(
+            self, f"/{{project_name}}/{stage}/athena/result_bucket_name"
+        )
 
-        # B) Ingest Lambda.
+        # B) Ingest Lambda (Athena INSERT path — see §3.4).
         ingest_fn = PythonFunction(
             self, "IngestRevenueFn",
             entry=str(Path(__file__).parent.parent / "lambda" / "ingest_revenue"),
@@ -494,18 +580,27 @@ class ComputeStack(Stack):
             timeout=Duration.minutes(5),
             memory_size=1024,
             environment={
-                "TABLE_BUCKET_ARN":  table_bucket_arn,
-                "NAMESPACE":         "lakehouse",
-                "TABLE_NAME":        "fact_revenue",
+                "DATABASE":   "lakehouse",
+                "NAMESPACE":  "lakehouse",
+                "TABLE_NAME": "fact_revenue",
+                "WORKGROUP":  athena_wg_name,
+                "CATALOG":    f"s3tablescatalog/{table_bucket_name}",
             },
         )
 
-        # C) Identity-side grants — s3tables, glue (for federated catalog),
-        #    kms on the CMK ARN (string, not an imported Key).
+        # C) Identity-side grants — Athena + s3tables metadata + glue
+        #    (for federated catalog) + kms on the CMK ARN (string).
         ingest_fn.add_to_role_policy(iam.PolicyStatement(
             actions=[
-                "s3tables:PutTableData",
-                "s3tables:GetTableData",
+                "athena:StartQueryExecution", "athena:GetQueryExecution",
+                "athena:GetQueryResults",     "athena:StopQueryExecution",
+            ],
+            resources=[
+                f"arn:aws:athena:{self.region}:{self.account}:workgroup/{athena_wg_name}",
+            ],
+        ))
+        ingest_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
                 "s3tables:GetTableMetadataLocation",
                 "s3tables:UpdateTableMetadataLocation",
                 "s3tables:GetTable",
@@ -533,12 +628,22 @@ class ComputeStack(Stack):
             actions=["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"],
             resources=[cmk_arn],
         ))
+        # Athena result bucket — the INSERT writes metadata + a tiny
+        # receipt here, so the Lambda needs read/write on it.
+        ingest_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetBucketLocation", "s3:GetObject", "s3:PutObject",
+                     "s3:ListBucket"],
+            resources=[
+                f"arn:aws:s3:::{athena_results_bucket}",
+                f"arn:aws:s3:::{athena_results_bucket}/*",
+            ],
+        ))
 ```
 
 ### 4.4 Micro-stack gotchas
 
 - **`value_for_string_parameter` returns a token.** Use it directly in `resources=[...]` and `environment={...}` — do NOT call `.split("/")` or compute on it in Python at synth time. If you need to build a child ARN (e.g. `{bucket_arn}/namespace/lakehouse`), use an f-string with the token — CDK resolves at deploy time.
-- **Table ARNs are NOT `{bucket_arn}/table/{ns}/{name}` in IAM resource strings for all actions.** Some actions (`s3tables:ListTables`, `s3tables:GetNamespace`) require the **namespace ARN** `{bucket_arn}/namespace/{ns}`; others (`s3tables:GetTableData`, `PutTableData`) require the **table ARN** `{bucket_arn}/table/{ns}/{name}`. Keep both in mind when scoping.
+- **Table ARNs are NOT `{bucket_arn}/table/{ns}/{name}` in IAM resource strings for all actions.** Some actions (`s3tables:ListTables`, `s3tables:GetNamespace`) require the **namespace ARN** `{bucket_arn}/namespace/{ns}`; others (`s3tables:GetTable`, `s3tables:GetTableMetadataLocation`, `s3tables:UpdateTableMetadataLocation`) require the **table ARN** `{bucket_arn}/table/{ns}/{name}`. Keep both in mind when scoping.
 - **Glue Catalog federation entry lives under the BUCKET NAME, not the ARN.** The ARN shape `arn:aws:glue:<region>:<account>:database/s3tablescatalog/<bucket-name>/<namespace>` uses the name. Publish both `table_bucket_name` and `table_bucket_arn` — consumers need the name for Glue grants and the ARN for S3 Tables grants.
 - **Cross-stack deletion order**: if `TableBucketStack` is deleted while `ComputeStack` still references `TableBucketArnParam` via SSM, the param disappears and the consumer's next deploy fails on `ParameterNotFound`. Deploy order: `TableBucketStack` → `ComputeStack`. Delete order: `ComputeStack` → `TableBucketStack`.
 - **Time-travel queries need `fact_revenue` to retain old snapshots**. If `max_snapshot_age_hours` defaults to 120h (5 days), a query with `FOR TIMESTAMP AS OF '2024-01-01'` will fail. Tune `TableMaintenanceConfiguration` per table for time-travel-heavy use cases.
@@ -556,8 +661,9 @@ class ComputeStack(Stack):
 | Query engine | Athena | Redshift Serverless (Spectrum) | Complex joins + materialized views + concurrency scaling. Pair with Redshift when BI dashboards need sub-second repeated queries. |
 | Schema authority | Glue Catalog (auto-federated) | Open-source Iceberg REST catalog (Tabular / Polaris) | Portability to non-AWS engines; but loses Lake Formation integration. Only if multi-cloud is a hard requirement. |
 | Governance | Lake Formation TBAC (`DATA_LAKE_FORMATION`) | IAM-only column filtering | LF is heavier to set up but gives tag-based grants + cross-account. IAM-only is fine for single-account, single-team lakes. |
-| Bulk load | `PutTableData` via Lambda | EMR `INSERT INTO` via Spark | Multi-GB inserts — EMR is cheaper and faster. Lambda ingest caps at 15 min × 10 GB memory. |
-| Change-data-capture source | Firehose → Lambda → `PutTableData` | AWS Zero-ETL from Aurora → Iceberg (`DATA_ZERO_ETL`) | Zero-ops for DB replicas; but 5-min minimum lag and Aurora-only today. |
+| Bulk load | Athena `INSERT INTO` from Lambda (shown in §3.4) | EMR `INSERT INTO` via Spark | Multi-GB inserts — EMR + Spark is cheaper and faster. Lambda + Athena caps around 1000 rows per INSERT + 15 min Lambda timeout. |
+| Bulk load | Athena `INSERT INTO` | pyiceberg via Iceberg REST catalog | Lower-latency per-row writes; cost: Lambda Docker image + pyiceberg cold start ~2 s. Good for sub-second streaming. |
+| Change-data-capture source | Firehose → direct-to-Iceberg | AWS Zero-ETL from Aurora → Iceberg (`DATA_ZERO_ETL`) | Zero-ops for DB replicas; but 5-min minimum lag and Aurora-only today. |
 
 ---
 
@@ -633,53 +739,50 @@ Marked `integration` — runs only in `pytest -m integration`."""
 import os, time, json
 import pytest
 import boto3
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 
 @pytest.mark.integration
-def test_put_then_athena_query():
-    tba = os.environ["TABLE_BUCKET_ARN"]
+def test_insert_then_query_via_athena():
     tbn = os.environ["TABLE_BUCKET_NAME"]
     wg  = os.environ["ATHENA_WORKGROUP"]
+    catalog = f"s3tablescatalog/{tbn}"
+    ath = boto3.client("athena")
 
-    # 1) Put three rows as Parquet.
-    s3t = boto3.client("s3tables")
-    rows = [
-        {"order_id": 1, "customer_id": "c1", "ts": "2026-04-22T00:00:00Z", "amount": "100.00"},
-        {"order_id": 2, "customer_id": "c1", "ts": "2026-04-22T00:05:00Z", "amount": "250.00"},
-        {"order_id": 3, "customer_id": "c2", "ts": "2026-04-22T00:10:00Z", "amount":  "50.00"},
-    ]
-    tbl = pa.Table.from_pylist(rows)
-    buf = pa.BufferOutputStream()
-    pq.write_table(tbl, buf)
-    s3t.put_table_data(
-        tableBucketARN=tba, namespace="lakehouse", name="fact_revenue",
-        format="PARQUET", data=buf.getvalue().to_pybytes(),
+    def _run(sql: str) -> dict:
+        exec_id = ath.start_query_execution(
+            QueryString=sql,
+            QueryExecutionContext={"Catalog": catalog, "Database": "lakehouse"},
+            WorkGroup=wg,
+        )["QueryExecutionId"]
+        for _ in range(120):
+            q = ath.get_query_execution(QueryExecutionId=exec_id)["QueryExecution"]
+            st = q["Status"]["State"]
+            if st in ("SUCCEEDED", "FAILED", "CANCELLED"):
+                break
+            time.sleep(1)
+        assert st == "SUCCEEDED", f"{st}: {q['Status'].get('StateChangeReason')}"
+        return ath.get_query_results(QueryExecutionId=exec_id)
+
+    # 1) INSERT three rows via Athena (no boto3 s3tables PutTableData — that
+    #    method does not exist in the GA SDK; row writes go via Athena INSERT,
+    #    pyiceberg, Firehose, or Spark).
+    _run(
+        'INSERT INTO fact_revenue (order_id, customer_id, ts, amount, currency) '
+        "VALUES "
+        "(1, 'c1', TIMESTAMP '2026-04-22 00:00:00', DECIMAL '100.00', 'USD'), "
+        "(2, 'c1', TIMESTAMP '2026-04-22 00:05:00', DECIMAL '250.00', 'USD'), "
+        "(3, 'c2', TIMESTAMP '2026-04-22 00:10:00', DECIMAL  '50.00', 'USD')"
     )
 
-    # 2) Query via Athena against the federated catalog.
-    ath = boto3.client("athena")
-    exec_id = ath.start_query_execution(
-        QueryString="SELECT customer_id, SUM(amount) AS total FROM fact_revenue GROUP BY customer_id",
-        QueryExecutionContext={
-            "Catalog":  f"s3tablescatalog/{tbn}",
-            "Database": "lakehouse",
-        },
-        WorkGroup=wg,
-    )["QueryExecutionId"]
-    for _ in range(60):
-        st = ath.get_query_execution(QueryExecutionId=exec_id)["QueryExecution"]["Status"]["State"]
-        if st in ("SUCCEEDED", "FAILED", "CANCELLED"):
-            break
-        time.sleep(1)
-    assert st == "SUCCEEDED", f"Athena query failed in state {st}"
-
-    rows_out = ath.get_query_results(QueryExecutionId=exec_id)["ResultSet"]["Rows"]
-    # Row 0 is the header; rows 1..N are data.
-    data = {r["Data"][0]["VarCharValue"]: r["Data"][1]["VarCharValue"] for r in rows_out[1:]}
+    # 2) Query the same table.
+    rows = _run(
+        "SELECT customer_id, SUM(amount) AS total "
+        "FROM fact_revenue GROUP BY customer_id"
+    )["ResultSet"]["Rows"]
+    data = {r["Data"][0]["VarCharValue"]: r["Data"][1]["VarCharValue"]
+            for r in rows[1:]}
     assert data["c1"] == "350.00"
-    assert data["c2"] == "50.00"
+    assert data["c2"] ==  "50.00"
 ```
 
 Run `pytest tests/test_table_bucket_synth.py -v` offline to validate the CDK shape; `pytest tests/test_integration_put_query.py -v -m integration` after deploy for the full round-trip.

@@ -262,9 +262,14 @@ def _create_quicksight_q(self, stage: str) -> None:
                     column_description="Order total in the order's currency.",
                     column_synonyms=["revenue", "total", "sales", "order_value"],
                     aggregation="SUM",
+                    # SemanticType.TypeName is an enum — ALL-CAPS values only:
+                    #   BOOLEAN | CURRENCY | DATE | DIMENSION | DISTANCE |
+                    #   DURATION | GEO_POINT | LOCATION | NUMBER | PERCENT |
+                    #   PRODUCT | QUANTITY | TEMPERATURE | TIME | UUID
+                    # SubTypeName holds qualifiers (e.g. currency code "USD").
                     semantic_type=qs.CfnTopic.SemanticTypeProperty(
-                        type_name="Currency",
-                        type_parameters={"symbol": "USD", "precision": "2"},
+                        type_name="CURRENCY",
+                        sub_type_name="USD",
                     ),
                 ),
                 qs.CfnTopic.TopicColumnProperty(
@@ -279,7 +284,7 @@ def _create_quicksight_q(self, stage: str) -> None:
                     column_synonyms=["date", "order time", "settlement date"],
                     time_granularity="DAY",
                     semantic_type=qs.CfnTopic.SemanticTypeProperty(
-                        type_name="Date",
+                        type_name="DATE",
                     ),
                 ),
                 qs.CfnTopic.TopicColumnProperty(
