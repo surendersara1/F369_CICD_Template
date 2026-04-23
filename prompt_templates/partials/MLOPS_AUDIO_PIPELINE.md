@@ -212,7 +212,8 @@ def _create_audio_pipeline(self, stage: str) -> None:
         ),
         architecture=_lambda.Architecture.ARM_64,
         memory_size=10240,                     # 10 GB — feature extraction is memory-heavy
-        ephemeral_storage_size=Duration.seconds(0) and None,  # default /tmp 512 MB is enough
+        # Leaving ephemeral_storage at the 512 MB default — raise only if you
+        # stream WAV chunks > ~400 MB to /tmp simultaneously.
         timeout=Duration.minutes(15),
         log_group=log,
         tracing=_lambda.Tracing.ACTIVE,

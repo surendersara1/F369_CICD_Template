@@ -679,10 +679,15 @@ class CodeInterpreterStack(cdk.Stack):
             ci_identifier = ci.code_interpreter_identifier
         else:
             ci_identifier = "aws.codeinterpreter.v1"
-            ci_arn        = "*"
-            # Scoped-ARN for system CI is not trivially constructible —
-            # see gotcha 7 in §3.6. Use "*" and rely on the identifier
-            # parameter for routing.
+            # System CI — construct scoped ARN instead of "*". This matches
+            # the AWS-owned ARN shape `arn:aws:bedrock-agentcore:<region>:aws:
+            # code-interpreter/aws.codeinterpreter.v1`. If a deploy-time IAM
+            # simulator rejects this shape, fall back to "*" ONLY after
+            # verifying with the AgentCore devguide — see gotcha 7 in §3.6.
+            ci_arn = (
+                f"arn:aws:bedrock-agentcore:{Stack.of(self).region}"
+                f":aws:code-interpreter/aws.codeinterpreter.v1"
+            )
 
         # D) Publish for consumer stacks.
         ssm.StringParameter(
@@ -752,8 +757,9 @@ analysis_fn.add_to_role_policy(iam.PolicyStatement(
         "bedrock-agentcore:StopCodeInterpreterSession",
         "bedrock-agentcore:InvokeCodeInterpreter",
     ],
-    # ci_arn resolves to the custom-CI ARN at deploy time, or to "*" for the
-    # system CI (scoping is then by `codeInterpreterIdentifier` at runtime).
+    # ci_arn resolves to either the custom-CI ARN (user-provisioned) or the
+    # scoped system-CI ARN (`...:aws:code-interpreter/aws.codeinterpreter.v1`).
+    # In both cases `codeInterpreterIdentifier` is the runtime routing key.
     resources=[ci_arn],
 ))
 analysis_fn.add_to_role_policy(iam.PolicyStatement(

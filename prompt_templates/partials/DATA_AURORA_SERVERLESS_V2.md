@@ -114,6 +114,12 @@ def _create_aurora_serverless_v2(self, stage: str) -> None:
         # Performance Insights for slow-query analysis
         # TODO(verify): performance_insights_retention on Serverless v2 clusters
         #   is sometimes only settable on the ClusterInstance, not the cluster.
+        # NOTE: `rds.ParameterGroup` passed via `parameter_group=` on a
+        # DatabaseCluster synthesizes to AWS::RDS::DBClusterParameterGroup
+        # (CDK auto-calls bindToCluster()). `shared_preload_libraries` is a
+        # cluster-level param and is applied correctly. If you ever observe
+        # the param not taking effect, drop to the L1 escape hatch
+        # `rds.CfnDBClusterParameterGroup` and reference it via `cfn_cluster`.
         parameter_group=rds.ParameterGroup(
             self, "AuroraParamGroup",
             engine=rds.DatabaseClusterEngine.aurora_postgres(
