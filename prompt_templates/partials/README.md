@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 83 v2.0 partials (as of 2026-04-26 — added 8 data-platform partials in Wave 5)
+**Count:** 91 v2.0 partials (as of 2026-04-26 — Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -120,6 +120,14 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`MLOPS_GROUND_TRUTH.md`](MLOPS_GROUND_TRUTH.md) | Ground Truth labelling | R1 | PASS |
 | [`MLOPS_AUDIO_PIPELINE.md`](MLOPS_AUDIO_PIPELINE.md) | Docker audio preprocessing + SageMaker MME | R2 | PASS (post-fix) |
 | [`MLOPS_QUICKSIGHT_Q.md`](MLOPS_QUICKSIGHT_Q.md) | QuickSight Q topics + embedding | R3 | PASS (post-fix) |
+| [`MLOPS_HYPERPOD_FM_TRAINING.md`](MLOPS_HYPERPOD_FM_TRAINING.md) | HyperPod Slurm + EKS for resilient FM training (Llama 3 70B/405B); FSx Lustre + EFA + auto-recovery | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_LLM_FINETUNING_PROD.md`](MLOPS_LLM_FINETUNING_PROD.md) | PEFT-LoRA pipeline + adapter inference components + JumpStart UI domain adaptation; multi-tenant LoRA serving | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_DISTRIBUTED_TRAINING.md`](MLOPS_DISTRIBUTED_TRAINING.md) | SMDDP data parallel + FSDP + DeepSpeed ZeRO-3; multi-node multi-GPU training jobs (non-HyperPod) | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_ASYNC_INFERENCE.md`](MLOPS_ASYNC_INFERENCE.md) | Async endpoints w/ S3 in/out + SNS notifications + auto-scale to 0; large-payload + bursty workloads | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_SAGEMAKER_UNIFIED_STUDIO.md`](MLOPS_SAGEMAKER_UNIFIED_STUDIO.md) | DataZone-integrated workspace + MLflow Apps + Bedrock + S3 Tables + TIP; modern Studio replacement | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_INFERENCE_PIPELINE_RECOMMENDER.md`](MLOPS_INFERENCE_PIPELINE_RECOMMENDER.md) | Multi-container inference pipelines (Serial/Direct) + Inference Recommender for right-sizing | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_CROSS_ACCOUNT_DEPLOY.md`](MLOPS_CROSS_ACCOUNT_DEPLOY.md) | 3-account ML governance (training → staging → prod) via RAM share + cross-account KMS/ECR/S3 | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_TRAINIUM_INFERENTIA_NEURON.md`](MLOPS_TRAINIUM_INFERENTIA_NEURON.md) | Trainium2 (training) + Inferentia2 (inference) on Neuron SDK 2.20+; 40-75% cost vs GPU | NEW (R6 pending) | UNAUDITED |
 
 ### Agent / query patterns
 
@@ -159,6 +167,14 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | EMR Serverless + Spark | `DATA_EMR_SERVERLESS_SPARK.md` | §3.2 (CfnApplication + Iceberg conf) |
 | Athena Federated Query | `DATA_ATHENA_FEDERATED_QUERY.md` | §3.3 (SAR connector) + §4 (Glue Federation) |
 | Data lake security baseline | `SECURITY_DATALAKE_CHECKLIST.md` | §4 (30-control composite) |
+| HyperPod cluster (FM training) | `MLOPS_HYPERPOD_FM_TRAINING.md` | §3 (Slurm) + §4 (EKS) |
+| LLM PEFT-LoRA fine-tune (production) | `MLOPS_LLM_FINETUNING_PROD.md` | §3 (Pipeline) + §5 (adapter components) |
+| Multi-node distributed training (non-HyperPod) | `MLOPS_DISTRIBUTED_TRAINING.md` | §3.2 (SMDDP+FSDP) + §4 (SMP) |
+| Async inference (large payloads, bursty) | `MLOPS_ASYNC_INFERENCE.md` | §3.2 (endpoint + SNS topics) |
+| SageMaker Unified Studio | `MLOPS_SAGEMAKER_UNIFIED_STUDIO.md` | §3.2 (DataZone + Studio) |
+| Multi-container inference pipeline + Inference Recommender | `MLOPS_INFERENCE_PIPELINE_RECOMMENDER.md` | §3.2 (CfnModel containers) + §5 (Recommender job) |
+| Cross-account model deployment | `MLOPS_CROSS_ACCOUNT_DEPLOY.md` | §3 (3-account flow with RAM) |
+| Trainium2 / Inferentia2 / Neuron SDK | `MLOPS_TRAINIUM_INFERENTIA_NEURON.md` | §3 (training) + §4 (inference) |
 | AgentCore Runtime | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1) |
 | AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 |
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
