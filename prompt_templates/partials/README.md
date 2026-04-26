@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 75 v2.0 partials (as of 2026-04-23)
+**Count:** 83 v2.0 partials (as of 2026-04-26 — added 8 data-platform partials in Wave 5)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -64,6 +64,19 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`DATA_MSK_KAFKA.md`](DATA_MSK_KAFKA.md) | MSK Serverless + connectors | R1 | PASS |
 | [`DATA_ZERO_ETL.md`](DATA_ZERO_ETL.md) | Aurora/DDB → Redshift managed CDC via `CfnIntegration` | R3 | WARN (DDB source shape drift) |
 | [`DATA_DATAZONE.md`](DATA_DATAZONE.md) | DataZone domain/project/data-product mesh | R3 | WARN (paginator name verify) |
+| [`DATA_DMS_REPLICATION.md`](DATA_DMS_REPLICATION.md) | DMS Serverless homogeneous (2024 GA) + classic heterogeneous + S3 lakehouse landing | NEW (R5 pending) | UNAUDITED |
+| [`DATA_RDS_MULTIAZ_CLUSTER.md`](DATA_RDS_MULTIAZ_CLUSTER.md) | RDS Multi-AZ DB cluster (3-node semi-sync) + Aurora Multi-AZ deployment + RDS Proxy | NEW (R5 pending) | UNAUDITED |
+| [`DATA_EVENTBRIDGE_PIPES.md`](DATA_EVENTBRIDGE_PIPES.md) | DDB Streams / Kinesis / MSK source → enrich → S3/Firehose/SFN target | NEW (R5 pending) | UNAUDITED |
+| [`DATA_APPFLOW_SAAS_INGEST.md`](DATA_APPFLOW_SAAS_INGEST.md) | Salesforce / Slack / ServiceNow / 60+ SaaS sources → S3 raw zone | NEW (R5 pending) | UNAUDITED |
+| [`DATA_EMR_SERVERLESS_SPARK.md`](DATA_EMR_SERVERLESS_SPARK.md) | EMR Serverless 7.12 + Spark on Iceberg/Hudi/Delta + Glue Catalog + LF integration | NEW (R5 pending) | UNAUDITED |
+| [`DATA_AURORA_GLOBAL_DR.md`](DATA_AURORA_GLOBAL_DR.md) | Aurora Global Database cross-region DR (RPO ≤ 1s, RTO ≤ 1 min) + AWS Backup cross-region | NEW (R5 pending) | UNAUDITED |
+| [`DATA_ATHENA_FEDERATED_QUERY.md`](DATA_ATHENA_FEDERATED_QUERY.md) | Athena Federated Query (30+ Lambda connectors via SAR + Glue Catalog Federation) | NEW (R5 pending) | UNAUDITED |
+
+### Security composite
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`SECURITY_DATALAKE_CHECKLIST.md`](SECURITY_DATALAKE_CHECKLIST.md) | 30-control composite security baseline for data lakes (LF + KMS + Macie + GuardDuty + CloudTrail Lake + Object Lock + Config + Access Analyzer) + daily audit Lambda | NEW (R5 pending) | UNAUDITED |
 
 ### AgentCore
 
@@ -137,6 +150,15 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | Athena workgroups | `DATA_ATHENA.md` | §3.2 (workgroup + result bucket) |
 | Aurora Postgres v2 | `DATA_AURORA_SERVERLESS_V2.md` | §3.2 (cluster + param group) |
 | Zero-ETL | `DATA_ZERO_ETL.md` | §3.2 (RDS Integration) |
+| DMS migration / CDC | `DATA_DMS_REPLICATION.md` | §3 (homogeneous) + §4 (heterogeneous + S3 target) |
+| RDS Multi-AZ DB cluster | `DATA_RDS_MULTIAZ_CLUSTER.md` | §3.2 (cluster_type=CLUSTER_MULTI_AZ) |
+| Aurora Multi-AZ deployment | `DATA_RDS_MULTIAZ_CLUSTER.md` | §4 (provisioned readers + auto-scaling) |
+| Aurora Global Database (cross-region) | `DATA_AURORA_GLOBAL_DR.md` | §3 (primary) + §3.3 (secondary cross-region) |
+| EventBridge Pipes | `DATA_EVENTBRIDGE_PIPES.md` | §3.2 (pipe + filter + enrich) |
+| AppFlow SaaS ingest | `DATA_APPFLOW_SAAS_INGEST.md` | §3.2 (Salesforce flow + tasks) |
+| EMR Serverless + Spark | `DATA_EMR_SERVERLESS_SPARK.md` | §3.2 (CfnApplication + Iceberg conf) |
+| Athena Federated Query | `DATA_ATHENA_FEDERATED_QUERY.md` | §3.3 (SAR connector) + §4 (Glue Federation) |
+| Data lake security baseline | `SECURITY_DATALAKE_CHECKLIST.md` | §4 (30-control composite) |
 | AgentCore Runtime | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1) |
 | AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 |
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
