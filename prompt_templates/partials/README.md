@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 91 v2.0 partials (as of 2026-04-26 — Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 98 v2.0 partials (as of 2026-04-26 — Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -128,6 +128,13 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`MLOPS_INFERENCE_PIPELINE_RECOMMENDER.md`](MLOPS_INFERENCE_PIPELINE_RECOMMENDER.md) | Multi-container inference pipelines (Serial/Direct) + Inference Recommender for right-sizing | NEW (R6 pending) | UNAUDITED |
 | [`MLOPS_CROSS_ACCOUNT_DEPLOY.md`](MLOPS_CROSS_ACCOUNT_DEPLOY.md) | 3-account ML governance (training → staging → prod) via RAM share + cross-account KMS/ECR/S3 | NEW (R6 pending) | UNAUDITED |
 | [`MLOPS_TRAINIUM_INFERENTIA_NEURON.md`](MLOPS_TRAINIUM_INFERENTIA_NEURON.md) | Trainium2 (training) + Inferentia2 (inference) on Neuron SDK 2.20+; 40-75% cost vs GPU | NEW (R6 pending) | UNAUDITED |
+| [`MLOPS_LINEAGE_TRACKING.md`](MLOPS_LINEAGE_TRACKING.md) | ML Lineage API + auto-capture from Pipelines + Model Cards + compliance query Lambda | NEW (R7 pending) | UNAUDITED |
+| [`MLOPS_MODEL_MONITOR_ADVANCED.md`](MLOPS_MODEL_MONITOR_ADVANCED.md) | Full 4-monitor pattern (Data + Model + Bias + Feature Attribution drift) + auto-rollback | NEW (R7 pending) | UNAUDITED |
+| [`MLOPS_SMART_SIFTING.md`](MLOPS_SMART_SIFTING.md) | Drop-in DataLoader wrapper for 30-50% training cost savings on language models | NEW (R7 pending) | UNAUDITED |
+| [`MLOPS_STUDIO_SPACES_LIFECYCLE.md`](MLOPS_STUDIO_SPACES_LIFECYCLE.md) | Per-user Studio Spaces (private + shared) + Custom Studio Images + Lifecycle Configurations | NEW (R7 pending) | UNAUDITED |
+| [`MLOPS_CANVAS_NO_CODE.md`](MLOPS_CANVAS_NO_CODE.md) | No-code ML for citizen data scientists; AutoML + JumpStart UI + GenAI Q&A; handoff to MLOps | NEW (R7 pending) | UNAUDITED |
+| [`MLOPS_GROUND_TRUTH_PLUS.md`](MLOPS_GROUND_TRUTH_PLUS.md) | Managed labeling service supporting infra (input + output buckets, IAM grants, batch trigger) | NEW (R7 pending) | UNAUDITED |
+| [`MLOPS_GEOSPATIAL_ML.md`](MLOPS_GEOSPATIAL_ML.md) | Earth Observation Jobs (Sentinel-2 + Landsat) + pre-built models (LULC, NDVI, cloud removal) + custom training | NEW (R7 pending) | UNAUDITED |
 
 ### Agent / query patterns
 
@@ -175,6 +182,13 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | Multi-container inference pipeline + Inference Recommender | `MLOPS_INFERENCE_PIPELINE_RECOMMENDER.md` | §3.2 (CfnModel containers) + §5 (Recommender job) |
 | Cross-account model deployment | `MLOPS_CROSS_ACCOUNT_DEPLOY.md` | §3 (3-account flow with RAM) |
 | Trainium2 / Inferentia2 / Neuron SDK | `MLOPS_TRAINIUM_INFERENTIA_NEURON.md` | §3 (training) + §4 (inference) |
+| ML Lineage / Model Cards | `MLOPS_LINEAGE_TRACKING.md` | §3 (manual + auto capture) + §4 (compliance query) |
+| Model Monitor (drift detection, all 4 types) | `MLOPS_MODEL_MONITOR_ADVANCED.md` | §4 (CDK), §5 (baseline calibration) |
+| Smart Sifting (training cost savings) | `MLOPS_SMART_SIFTING.md` | §3.2 (PyTorch wrapper) |
+| Studio Spaces (per-user) | `MLOPS_STUDIO_SPACES_LIFECYCLE.md` | §3.2 + §5 (custom image) + §6 (lifecycle script) |
+| Canvas (no-code ML) | `MLOPS_CANVAS_NO_CODE.md` | §3.2 (enable in domain + per-user) |
+| Ground Truth Plus (managed labeling) | `MLOPS_GROUND_TRUTH_PLUS.md` | §3.3 (CDK supporting infra) |
+| Geospatial ML (Earth Observation) | `MLOPS_GEOSPATIAL_ML.md` | §3.3 (CDK + EOJ trigger) |
 | AgentCore Runtime | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1) |
 | AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 |
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
