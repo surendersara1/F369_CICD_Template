@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 123 v2.0 partials (as of 2026-04-27 — Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 127 v2.0 partials (as of 2026-04-27 — Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -164,6 +164,15 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`ENTERPRISE_NETWORK_HUB_TGW.md`](ENTERPRISE_NETWORK_HUB_TGW.md) | Transit Gateway hub + Egress VPC + Inspection VPC w/ Network Firewall + RAM share to org + R53 Resolver inbound/outbound + centralized PrivateLink endpoints | NEW (R11 pending) | UNAUDITED |
 | [`ENTERPRISE_CENTRALIZED_LOGGING.md`](ENTERPRISE_CENTRALIZED_LOGGING.md) | CloudTrail org trail + Log Archive S3 (Object Lock COMPLIANCE 7y + cross-region replication) + CloudTrail Lake event store + AWS Security Lake (OCSF Iceberg, Apr 2024 GA) | NEW (R11 pending) | UNAUDITED |
 | [`ENTERPRISE_SECURITY_HUB_GD_ORG.md`](ENTERPRISE_SECURITY_HUB_GD_ORG.md) | Security Hub Central Configuration (Sept 2024) + GuardDuty 6 features org-wide + Inspector v2 + Macie + Detective + Access Analyzer + 4 standards subscriptions + finding routing | NEW (R11 pending) | UNAUDITED |
+
+### Disaster Recovery / Resilience
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`DR_MULTI_REGION_PATTERNS.md`](DR_MULTI_REGION_PATTERNS.md) | 4 DR patterns (Backup-Restore / Pilot Light / Warm Standby / Active-Active) + RPO/RTO matrix + multi-region KMS / Aurora Global / DDB Global / S3 CRR with RTC + Route 53 failover | NEW (R14 pending) | UNAUDITED |
+| [`DR_ROUTE53_ARC.md`](DR_ROUTE53_ARC.md) | Route 53 Application Recovery Controller — 5-region cluster + routing controls + readiness checks + safety rules + zonal shift/autoshift + failover script | NEW (R14 pending) | UNAUDITED |
+| [`DR_RESILIENCE_HUB_FIS.md`](DR_RESILIENCE_HUB_FIS.md) | Resilience Hub assessments + resiliency policies + AWS Fault Injection Service (FIS) experiments + stop conditions + tag-scoped IAM + game day playbook | NEW (R14 pending) | UNAUDITED |
+| [`DR_BACKUP_VAULT_LOCK.md`](DR_BACKUP_VAULT_LOCK.md) | AWS Backup centralized + Vault Lock COMPLIANCE (immutable) + cross-region copy + cross-account vault + Org backup policy + Backup Audit Manager + restore testing | NEW (R14 pending) | UNAUDITED |
 
 ### Migration
 
