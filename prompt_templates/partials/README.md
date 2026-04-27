@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 107 v2.0 partials (as of 2026-04-26 — Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 110 v2.0 partials (as of 2026-04-26 — Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -150,6 +150,14 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`EKS_SECURITY.md`](EKS_SECURITY.md) | Pod Security Standards (restricted) + VPC CNI Network Policy Agent + ECR + Inspector enhanced scan + GuardDuty EKS Audit Logs + Runtime Monitoring + Kyverno admission control + cosign image signing + IMDSv2 | NEW (R9 pending) | UNAUDITED |
 | [`EKS_COST_OPTIMIZATION.md`](EKS_COST_OPTIMIZATION.md) | Karpenter consolidation + VPA recommend mode + Compute Optimizer + Kubecost (CUR via Athena) + Spot strategy + Graviton ARM64 + Compute Savings Plans | NEW (R9 pending) | UNAUDITED |
 
+### Serverless Backend
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`SERVERLESS_LAMBDA_POWERTOOLS.md`](SERVERLESS_LAMBDA_POWERTOOLS.md) | Lambda Powertools v3 (Python) / v2 (TypeScript) — logger + tracer + metrics + idempotency + parameters + batch + event parser + feature flags + Lambda Layer pattern | NEW (R10 pending) | UNAUDITED |
+| [`SERVERLESS_DYNAMODB_PATTERNS.md`](SERVERLESS_DYNAMODB_PATTERNS.md) | Single-table design + GSI overload + transactions + DDB Streams + TTL + DAX + Global Tables v2 + PITR | NEW (R10 pending) | UNAUDITED |
+| [`SERVERLESS_HTTP_API_COGNITO.md`](SERVERLESS_HTTP_API_COGNITO.md) | API Gateway HTTP API v2 + Cognito JWT authorizer + custom domain + WAF + CORS + throttling + access logs | NEW (R10 pending) | UNAUDITED |
+
 ### Agent / query patterns
 
 | Canonical partial | Covers | First audited | Status |
@@ -212,6 +220,9 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | EKS GitOps (ArgoCD + ESO) | `EKS_GITOPS.md` | §3 (ArgoCD) + §4 (ApplicationSet) + §5 (ESO) |
 | EKS security (PSS + NetworkPolicy + ECR/Inspector + GuardDuty + Kyverno) | `EKS_SECURITY.md` | §3 (PSS) + §4 (NetworkPolicy) + §5 (ECR/Inspector) + §6 (GuardDuty) + §7 (Kyverno) |
 | EKS cost optimization (Karpenter + VPA + Spot + Graviton + SP) | `EKS_COST_OPTIMIZATION.md` | §3 (Karpenter consolidation) + §4 (VPA) + §6 (Kubecost) + §8 (SP) |
+| Lambda Powertools (logger/tracer/metrics/idempotency) | `SERVERLESS_LAMBDA_POWERTOOLS.md` | §3 (Monolith) + §4 (Layer) |
+| DynamoDB single-table design + GSI / transactions / Streams / DAX | `SERVERLESS_DYNAMODB_PATTERNS.md` | §3 (single-table + GSI) + §4 (Streams) + §6 (DAX) + §7 (Global Tables) |
+| HTTP API + Cognito JWT authorizer + custom domain + WAF | `SERVERLESS_HTTP_API_COGNITO.md` | §3 (Monolith) + §4 (Production WAF) |
 | AgentCore Runtime | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1) |
 | AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 |
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
