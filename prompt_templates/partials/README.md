@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 98 v2.0 partials (as of 2026-04-26 — Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 107 v2.0 partials (as of 2026-04-26 — Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -136,6 +136,20 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`MLOPS_GROUND_TRUTH_PLUS.md`](MLOPS_GROUND_TRUTH_PLUS.md) | Managed labeling service supporting infra (input + output buckets, IAM grants, batch trigger) | NEW (R7 pending) | UNAUDITED |
 | [`MLOPS_GEOSPATIAL_ML.md`](MLOPS_GEOSPATIAL_ML.md) | Earth Observation Jobs (Sentinel-2 + Landsat) + pre-built models (LULC, NDVI, cloud removal) + custom training | NEW (R7 pending) | UNAUDITED |
 
+### EKS / Kubernetes platform
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`EKS_CLUSTER_FOUNDATION.md`](EKS_CLUSTER_FOUNDATION.md) | EKS 1.32 control plane, managed node groups, EKS access entries (replaces aws-auth), OIDC provider, KMS envelope encryption, all 5 control plane logs, 4 EKS add-ons | NEW (R9 pending) | UNAUDITED |
+| [`EKS_KARPENTER_AUTOSCALING.md`](EKS_KARPENTER_AUTOSCALING.md) | Karpenter v1.0+ NodePool + EC2NodeClass + NodeClaim API; Pod Identity for controller; SQS interruption queue + 4 EventBridge rules; consolidation policies; spot+on-demand mix; disruption budgets | NEW (R9 pending) | UNAUDITED |
+| [`EKS_POD_IDENTITY.md`](EKS_POD_IDENTITY.md) | Pod Identity Associations (preferred) + IRSA fallback for cross-account; sts:TagSession trust requirement; IRSA→Pod Identity migration path | NEW (R9 pending) | UNAUDITED |
+| [`EKS_NETWORKING.md`](EKS_NETWORKING.md) | VPC CNI prefix delegation + Custom Networking for IP exhaustion; AWS Load Balancer Controller v2.8 (ALB IP-mode + group.name shared); NLB; Gateway API; ExternalDNS | NEW (R9 pending) | UNAUDITED |
+| [`EKS_OBSERVABILITY.md`](EKS_OBSERVABILITY.md) | Container Insights enhanced observability + amazon-cloudwatch-observability add-on + ADOT + AMP + AMG + Application Signals + Fluent Bit | NEW (R9 pending) | UNAUDITED |
+| [`EKS_STORAGE.md`](EKS_STORAGE.md) | EBS gp3-encrypted default StorageClass + EFS access points (RWX) + FSx Lustre PERSISTENT_2 (S3-hydrated) + FSx ONTAP + VolumeSnapshot CRDs | NEW (R9 pending) | UNAUDITED |
+| [`EKS_GITOPS.md`](EKS_GITOPS.md) | ArgoCD HA v2.13 + App-of-Apps + ApplicationSet + External Secrets Operator (ESO) + IAM Identity Center OIDC SSO + multi-cluster | NEW (R9 pending) | UNAUDITED |
+| [`EKS_SECURITY.md`](EKS_SECURITY.md) | Pod Security Standards (restricted) + VPC CNI Network Policy Agent + ECR + Inspector enhanced scan + GuardDuty EKS Audit Logs + Runtime Monitoring + Kyverno admission control + cosign image signing + IMDSv2 | NEW (R9 pending) | UNAUDITED |
+| [`EKS_COST_OPTIMIZATION.md`](EKS_COST_OPTIMIZATION.md) | Karpenter consolidation + VPA recommend mode + Compute Optimizer + Kubecost (CUR via Athena) + Spot strategy + Graviton ARM64 + Compute Savings Plans | NEW (R9 pending) | UNAUDITED |
+
 ### Agent / query patterns
 
 | Canonical partial | Covers | First audited | Status |
@@ -189,6 +203,15 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | Canvas (no-code ML) | `MLOPS_CANVAS_NO_CODE.md` | §3.2 (enable in domain + per-user) |
 | Ground Truth Plus (managed labeling) | `MLOPS_GROUND_TRUTH_PLUS.md` | §3.3 (CDK supporting infra) |
 | Geospatial ML (Earth Observation) | `MLOPS_GEOSPATIAL_ML.md` | §3.3 (CDK + EOJ trigger) |
+| EKS cluster (control plane + node groups + access entries) | `EKS_CLUSTER_FOUNDATION.md` | §3 (Monolith) + §7 (Micro-Stack) |
+| Karpenter v1.x autoscaling | `EKS_KARPENTER_AUTOSCALING.md` | §3 (Monolith NodePool) + §4 (multi-pool prod) |
+| Pod Identity / IRSA | `EKS_POD_IDENTITY.md` | §3 (Pod Identity) + §4 (IRSA cross-account) |
+| EKS networking (VPC CNI + LBC + ALB/NLB Ingress) | `EKS_NETWORKING.md` | §3 (ALB IP-mode) + §4 (NLB) + §6 (prefix delegation) |
+| EKS observability (Container Insights + ADOT + AMP/AMG) | `EKS_NETWORKING.md` → `EKS_OBSERVABILITY.md` | §3 (Container Insights) + §4 (ADOT/AMP/AMG) |
+| EKS storage (EBS/EFS/FSx) | `EKS_STORAGE.md` | §3 (EBS gp3) + §4 (EFS) + §5 (FSx Lustre) + §7 (snapshots) |
+| EKS GitOps (ArgoCD + ESO) | `EKS_GITOPS.md` | §3 (ArgoCD) + §4 (ApplicationSet) + §5 (ESO) |
+| EKS security (PSS + NetworkPolicy + ECR/Inspector + GuardDuty + Kyverno) | `EKS_SECURITY.md` | §3 (PSS) + §4 (NetworkPolicy) + §5 (ECR/Inspector) + §6 (GuardDuty) + §7 (Kyverno) |
+| EKS cost optimization (Karpenter + VPA + Spot + Graviton + SP) | `EKS_COST_OPTIMIZATION.md` | §3 (Karpenter consolidation) + §4 (VPA) + §6 (Kubecost) + §8 (SP) |
 | AgentCore Runtime | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1) |
 | AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 |
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
