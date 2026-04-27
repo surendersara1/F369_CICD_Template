@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 110 v2.0 partials (as of 2026-04-26 — Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 115 v2.0 partials (as of 2026-04-26 — Wave 11 added 5 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -150,6 +150,17 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`EKS_SECURITY.md`](EKS_SECURITY.md) | Pod Security Standards (restricted) + VPC CNI Network Policy Agent + ECR + Inspector enhanced scan + GuardDuty EKS Audit Logs + Runtime Monitoring + Kyverno admission control + cosign image signing + IMDSv2 | NEW (R9 pending) | UNAUDITED |
 | [`EKS_COST_OPTIMIZATION.md`](EKS_COST_OPTIMIZATION.md) | Karpenter consolidation + VPA recommend mode + Compute Optimizer + Kubecost (CUR via Athena) + Spot strategy + Graviton ARM64 + Compute Savings Plans | NEW (R9 pending) | UNAUDITED |
 
+### Enterprise / Multi-account governance
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`ENTERPRISE_CONTROL_TOWER.md`](ENTERPRISE_CONTROL_TOWER.md) | Control Tower landing zone v3 + canonical OU shape (Security/Workloads/Sandbox/Infrastructure/Suspended) + Account Factory + AFT + CfCT customizations + 30+ guardrails | NEW (R11 pending) | UNAUDITED |
+| [`ENTERPRISE_IDENTITY_CENTER.md`](ENTERPRISE_IDENTITY_CENTER.md) | IAM Identity Center + Permission Sets (4 canonical) + ABAC via session tags + Azure AD/Okta SAML federation + SCIM auto-provisioning + Trusted Token Issuer | NEW (R11 pending) | UNAUDITED |
+| [`ENTERPRISE_ORG_SCPS_RCPS.md`](ENTERPRISE_ORG_SCPS_RCPS.md) | 5 canonical SCPs (region opt-out, region restrict, security disable, root user, encrypt) + 2 RCPs (Nov 2024 GA — perimeter S3 + STS) + Declarative Policies + delegated admin | NEW (R11 pending) | UNAUDITED |
+| [`ENTERPRISE_NETWORK_HUB_TGW.md`](ENTERPRISE_NETWORK_HUB_TGW.md) | Transit Gateway hub + Egress VPC + Inspection VPC w/ Network Firewall + RAM share to org + R53 Resolver inbound/outbound + centralized PrivateLink endpoints | NEW (R11 pending) | UNAUDITED |
+| [`ENTERPRISE_CENTRALIZED_LOGGING.md`](ENTERPRISE_CENTRALIZED_LOGGING.md) | CloudTrail org trail + Log Archive S3 (Object Lock COMPLIANCE 7y + cross-region replication) + CloudTrail Lake event store + AWS Security Lake (OCSF Iceberg, Apr 2024 GA) | NEW (R11 pending) | UNAUDITED |
+| [`ENTERPRISE_SECURITY_HUB_GD_ORG.md`](ENTERPRISE_SECURITY_HUB_GD_ORG.md) | Security Hub Central Configuration (Sept 2024) + GuardDuty 6 features org-wide + Inspector v2 + Macie + Detective + Access Analyzer + 4 standards subscriptions + finding routing | NEW (R11 pending) | UNAUDITED |
+
 ### Serverless Backend
 
 | Canonical partial | Covers | First audited | Status |
@@ -223,6 +234,12 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | Lambda Powertools (logger/tracer/metrics/idempotency) | `SERVERLESS_LAMBDA_POWERTOOLS.md` | §3 (Monolith) + §4 (Layer) |
 | DynamoDB single-table design + GSI / transactions / Streams / DAX | `SERVERLESS_DYNAMODB_PATTERNS.md` | §3 (single-table + GSI) + §4 (Streams) + §6 (DAX) + §7 (Global Tables) |
 | HTTP API + Cognito JWT authorizer + custom domain + WAF | `SERVERLESS_HTTP_API_COGNITO.md` | §3 (Monolith) + §4 (Production WAF) |
+| Control Tower landing zone + OUs + AFT/CfCT | `ENTERPRISE_CONTROL_TOWER.md` | §3 (Monolith) + §5 (AFT) |
+| IAM Identity Center + Permission Sets + Azure AD federation | `ENTERPRISE_IDENTITY_CENTER.md` | §3 (Monolith) + §4 (Federated) |
+| SCPs / RCPs / Declarative Policies | `ENTERPRISE_ORG_SCPS_RCPS.md` | §3 (5 canonical SCPs) + §4 (RCPs) + §5 (Declarative) |
+| Transit Gateway hub-and-spoke + Network Firewall + RAM | `ENTERPRISE_NETWORK_HUB_TGW.md` | §3 (Monolith) + §4 (Network Firewall) |
+| Centralized logging (CloudTrail Lake + Security Lake + Log Archive) | `ENTERPRISE_CENTRALIZED_LOGGING.md` | §3 (Log Archive) + §4 (CloudTrail Lake) + §5 (Security Lake) |
+| Security Hub Central Config + GuardDuty 6 features + Inspector + Macie | `ENTERPRISE_SECURITY_HUB_GD_ORG.md` | §3 (Monolith) |
 | AgentCore Runtime | `AGENTCORE_RUNTIME.md` | §3.2 (alpha L2) + §3.2b (L1) |
 | AgentCore Memory | `AGENTCORE_MEMORY.md` | §3 |
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
