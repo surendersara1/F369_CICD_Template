@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 115 v2.0 partials (as of 2026-04-26 — Wave 11 added 5 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 119 v2.0 partials (as of 2026-04-26 — Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -71,6 +71,10 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`DATA_EMR_SERVERLESS_SPARK.md`](DATA_EMR_SERVERLESS_SPARK.md) | EMR Serverless 7.12 + Spark on Iceberg/Hudi/Delta + Glue Catalog + LF integration | NEW (R5 pending) | UNAUDITED |
 | [`DATA_AURORA_GLOBAL_DR.md`](DATA_AURORA_GLOBAL_DR.md) | Aurora Global Database cross-region DR (RPO ≤ 1s, RTO ≤ 1 min) + AWS Backup cross-region | NEW (R5 pending) | UNAUDITED |
 | [`DATA_ATHENA_FEDERATED_QUERY.md`](DATA_ATHENA_FEDERATED_QUERY.md) | Athena Federated Query (30+ Lambda connectors via SAR + Glue Catalog Federation) | NEW (R5 pending) | UNAUDITED |
+| [`DATA_KINESIS_STREAMS_FIREHOSE.md`](DATA_KINESIS_STREAMS_FIREHOSE.md) | Kinesis Data Streams on-demand + provisioned + Enhanced Fan-Out + Firehose Lambda transform + dynamic partitioning + Parquet conversion + S3/OS sinks | NEW (R12 pending) | UNAUDITED |
+| [`DATA_MANAGED_FLINK.md`](DATA_MANAGED_FLINK.md) | Amazon Managed Service for Apache Flink 1.20+ (Studio + Application) + Flink SQL + DataStream API + windowing + checkpointing + auto-scaling | NEW (R12 pending) | UNAUDITED |
+| [`DATA_OPENSEARCH_SERVERLESS.md`](DATA_OPENSEARCH_SERVERLESS.md) | OS Serverless 3 collection types (TIMESERIES + VECTORSEARCH + SEARCH) + 3 policy types (encryption/network/data) + ISM + IAM SigV4 + VPC endpoints | NEW (R12 pending) | UNAUDITED |
+| [`DATA_QUICKSIGHT_REALTIME.md`](DATA_QUICKSIGHT_REALTIME.md) | QuickSight Enterprise + Q (Bedrock-powered) + SPICE incremental refresh + RLS/CLS + embedded analytics + IDC SSO | NEW (R12 pending) | UNAUDITED |
 
 ### Security composite
 
@@ -206,6 +210,10 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | AppFlow SaaS ingest | `DATA_APPFLOW_SAAS_INGEST.md` | §3.2 (Salesforce flow + tasks) |
 | EMR Serverless + Spark | `DATA_EMR_SERVERLESS_SPARK.md` | §3.2 (CfnApplication + Iceberg conf) |
 | Athena Federated Query | `DATA_ATHENA_FEDERATED_QUERY.md` | §3.3 (SAR connector) + §4 (Glue Federation) |
+| Kinesis Data Streams + Firehose (real-time ingest, Lambda transform, dynamic partitioning) | `DATA_KINESIS_STREAMS_FIREHOSE.md` | §3 (Monolith) + §5 (Production EFO) |
+| Managed Flink (windowing, stateful streaming, Flink SQL) | `DATA_MANAGED_FLINK.md` | §3 (Monolith) + §4 (DataStream API) |
+| OpenSearch Serverless (TIMESERIES / VECTORSEARCH / SEARCH collections) | `DATA_OPENSEARCH_SERVERLESS.md` | §3 (TIMESERIES) + §4 (VECTORSEARCH) + §5 (Private VPC) |
+| QuickSight Enterprise + Q + embedded analytics + RLS | `DATA_QUICKSIGHT_REALTIME.md` | §3 (Monolith SPICE) + §4 (Embedded SaaS) |
 | Data lake security baseline | `SECURITY_DATALAKE_CHECKLIST.md` | §4 (30-control composite) |
 | HyperPod cluster (FM training) | `MLOPS_HYPERPOD_FM_TRAINING.md` | §3 (Slurm) + §4 (EKS) |
 | LLM PEFT-LoRA fine-tune (production) | `MLOPS_LLM_FINETUNING_PROD.md` | §3 (Pipeline) + §5 (adapter components) |
