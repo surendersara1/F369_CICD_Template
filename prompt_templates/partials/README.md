@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 130 v2.0 partials (as of 2026-04-27 — Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 134 v2.0 partials (as of 2026-04-27 — Wave 15 added 4 Bedrock Q Business + KB + Multi-Agent partials; Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -164,6 +164,15 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`ENTERPRISE_NETWORK_HUB_TGW.md`](ENTERPRISE_NETWORK_HUB_TGW.md) | Transit Gateway hub + Egress VPC + Inspection VPC w/ Network Firewall + RAM share to org + R53 Resolver inbound/outbound + centralized PrivateLink endpoints | NEW (R11 pending) | UNAUDITED |
 | [`ENTERPRISE_CENTRALIZED_LOGGING.md`](ENTERPRISE_CENTRALIZED_LOGGING.md) | CloudTrail org trail + Log Archive S3 (Object Lock COMPLIANCE 7y + cross-region replication) + CloudTrail Lake event store + AWS Security Lake (OCSF Iceberg, Apr 2024 GA) | NEW (R11 pending) | UNAUDITED |
 | [`ENTERPRISE_SECURITY_HUB_GD_ORG.md`](ENTERPRISE_SECURITY_HUB_GD_ORG.md) | Security Hub Central Configuration (Sept 2024) + GuardDuty 6 features org-wide + Inspector v2 + Macie + Detective + Access Analyzer + 4 standards subscriptions + finding routing | NEW (R11 pending) | UNAUDITED |
+
+### Bedrock GenAI (Q Business + KB + Agents)
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`BEDROCK_Q_BUSINESS.md`](BEDROCK_Q_BUSINESS.md) | Amazon Q Business application + 40+ data source connectors (S3, SharePoint, Confluence, Salesforce, ServiceNow, Slack, Teams, Box, Drive, Jira, etc.) + plugins (built-in + custom OpenAPI) + Custom Q Apps + AppRoles + IDC SSO + Pro/Lite tier | NEW (R15 pending) | UNAUDITED |
+| [`BEDROCK_KNOWLEDGE_BASES.md`](BEDROCK_KNOWLEDGE_BASES.md) | Bedrock KB deep dive: chunking strategies (default/fixed/hierarchical/semantic/custom Lambda) + vector store options (OS Serverless/Aurora pgvector/Pinecone/Redis/Neptune Analytics) + hybrid search + reranking + multi-tenant filters + Bedrock Guardrails | NEW (R15 pending) | UNAUDITED |
+| [`BEDROCK_AGENTS_MULTI_AGENT.md`](BEDROCK_AGENTS_MULTI_AGENT.md) | Bedrock Agents + Multi-Agent Collaboration (Dec 2024 GA) supervisor + collaborators + Action Groups (Lambda + OpenAPI + Code Interpreter + ROC) + KB association + memory + custom orchestration | NEW (R15 pending) | UNAUDITED |
+| [`BEDROCK_FLOWS_PROMPT_MGMT.md`](BEDROCK_FLOWS_PROMPT_MGMT.md) | Bedrock Flows visual orchestration + Prompt Management API + prompt versions + variants for A/B + prompt routing + flow versioning | NEW (R15 pending) | UNAUDITED |
 
 ### ECS / Containers (non-Kubernetes)
 
