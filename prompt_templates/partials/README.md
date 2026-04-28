@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 137 v2.0 partials (as of 2026-04-27 — Wave 17 added 3 CDN/edge compute partials; Wave 15 added 4 Bedrock Q Business + KB + Multi-Agent partials; Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials; Wave 7 added 7 P2/P3 SageMaker partials; Wave 6 added 8 SageMaker AI partials; Wave 5 added 8 data-platform partials)
+**Count:** 140 v2.0 partials (as of 2026-04-28 — Wave 18 added 3 Q Developer + agentic refactor partials; Wave 17 added 3 CDN/edge compute partials; Wave 15 added 4 Bedrock Q Business + KB + Multi-Agent partials; Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -164,6 +164,14 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`ENTERPRISE_NETWORK_HUB_TGW.md`](ENTERPRISE_NETWORK_HUB_TGW.md) | Transit Gateway hub + Egress VPC + Inspection VPC w/ Network Firewall + RAM share to org + R53 Resolver inbound/outbound + centralized PrivateLink endpoints | NEW (R11 pending) | UNAUDITED |
 | [`ENTERPRISE_CENTRALIZED_LOGGING.md`](ENTERPRISE_CENTRALIZED_LOGGING.md) | CloudTrail org trail + Log Archive S3 (Object Lock COMPLIANCE 7y + cross-region replication) + CloudTrail Lake event store + AWS Security Lake (OCSF Iceberg, Apr 2024 GA) | NEW (R11 pending) | UNAUDITED |
 | [`ENTERPRISE_SECURITY_HUB_GD_ORG.md`](ENTERPRISE_SECURITY_HUB_GD_ORG.md) | Security Hub Central Configuration (Sept 2024) + GuardDuty 6 features org-wide + Inspector v2 + Macie + Detective + Access Analyzer + 4 standards subscriptions + finding routing | NEW (R11 pending) | UNAUDITED |
+
+### AI Developer Productivity (Q Developer)
+
+| Canonical partial | Covers | First audited | Status |
+|---|---|---|---|
+| [`AI_DEV_Q_DEVELOPER.md`](AI_DEV_Q_DEVELOPER.md) | Amazon Q Developer (rebranded CodeWhisperer, GA Apr 2024) — Pro/Free tiers + IDE plugins (VSCode/JetBrains/VS/Cloud9/SM Studio) + CLI + agentic commands (/dev /test /review /transform) + Customizations + IDC governance + adoption telemetry | NEW (R18 pending) | UNAUDITED |
+| [`AI_DEV_Q_TRANSFORMATIONS.md`](AI_DEV_Q_TRANSFORMATIONS.md) | Q Developer /transform — Java 8/11 → 17/21, .NET Framework → .NET 8/9, COBOL → Java (preview), VMware → AWS (preview); pre-flight readiness, manual review gates, CI validation, multi-module monorepo strategy | NEW (R18 pending) | UNAUDITED |
+| [`AI_DEV_AGENTIC_REFACTOR.md`](AI_DEV_AGENTIC_REFACTOR.md) | Agentic refactor in CI/CD: CodeBuild + auto-PR + canary batched merges + CODEOWNERS gates + auto-revert workflow + refactor budget tracking | NEW (R18 pending) | UNAUDITED |
 
 ### CDN / Edge compute
 
