@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 140 v2.0 partials (as of 2026-04-28 — Wave 18 added 3 Q Developer + agentic refactor partials; Wave 17 added 3 CDN/edge compute partials; Wave 15 added 4 Bedrock Q Business + KB + Multi-Agent partials; Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials; Wave 10 added 3 serverless backend partials; Wave 9 added 9 EKS production partials)
+**Count:** 143 v2.0 partials (as of 2026-04-28 — Wave 19 added 3 Data Quality + DataZone + Mesh partials; Wave 18 added 3 Q Developer + agentic refactor partials; Wave 17 added 3 CDN/edge compute partials; Wave 15 added 4 Bedrock Q Business + KB + Multi-Agent partials; Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials)
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -75,6 +75,9 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`DATA_MANAGED_FLINK.md`](DATA_MANAGED_FLINK.md) | Amazon Managed Service for Apache Flink 1.20+ (Studio + Application) + Flink SQL + DataStream API + windowing + checkpointing + auto-scaling | NEW (R12 pending) | UNAUDITED |
 | [`DATA_OPENSEARCH_SERVERLESS.md`](DATA_OPENSEARCH_SERVERLESS.md) | OS Serverless 3 collection types (TIMESERIES + VECTORSEARCH + SEARCH) + 3 policy types (encryption/network/data) + ISM + IAM SigV4 + VPC endpoints | NEW (R12 pending) | UNAUDITED |
 | [`DATA_QUICKSIGHT_REALTIME.md`](DATA_QUICKSIGHT_REALTIME.md) | QuickSight Enterprise + Q (Bedrock-powered) + SPICE incremental refresh + RLS/CLS + embedded analytics + IDC SSO | NEW (R12 pending) | UNAUDITED |
+| [`DATA_GLUE_QUALITY.md`](DATA_GLUE_QUALITY.md) | AWS Glue Data Quality (GA Nov 2023) — DQDL syntax + recommendations engine + scheduled rules + data contracts + drift detection + CW metrics + EventBridge integration | NEW (R19 pending) | UNAUDITED |
+| [`DATA_DATAZONE_V2.md`](DATA_DATAZONE_V2.md) | Amazon DataZone (GA Sept 2023, v2 enhancements 2024) — domains/projects/environments + data products + business glossary + subscription workflow + LF integration + auto lineage + IDC | NEW (R19 pending) | UNAUDITED |
+| [`DATA_MESH_PATTERNS.md`](DATA_MESH_PATTERNS.md) | Data Mesh principles (Dehghani) on AWS — 5-stage maturity model + multi-account topology + LF-Tag ABAC + Service Catalog blueprints + data product SLOs + federated governance | NEW (R19 pending) | UNAUDITED |
 
 ### Security composite
 
