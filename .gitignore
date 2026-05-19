@@ -5,7 +5,12 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
-.claude/
+
+# Claude Code — share rules / commands / skills / agents with the team
+# Keep only personal/machine-specific files out of git
+.claude/settings.local.json
+.claude/.session-cache/
+CLAUDE.local.md
 
 # Local run artifacts
 audit_stdout.log
