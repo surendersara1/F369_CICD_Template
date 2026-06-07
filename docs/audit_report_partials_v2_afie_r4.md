@@ -40,8 +40,8 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 (§3.0 lifecycle awareness) ✓ + F-AFIE-20 (pricing SoT — pending) | PASS (F-AFIE-01+02); WARN pending F-AFIE-20 |
 | 3 | LAYER_API | WARN (R1 F002 fix never landed) | F-AFIE-03 (R1 fix + default_method_options + AFIE F-INT-01 retro) ✓; F-AFIE-19 (WebSocket $connect auth — pending) | PASS (F-AFIE-03); WARN pending F-AFIE-19 |
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (canonical-pattern intent made explicit + verified default_authorizer mandate) ✓ | PASS |
-| 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (TLS pick-one + us-east-1 pin) | TBD |
-| 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (HSTS + headers policy) | TBD |
+| 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (§3.0 TLS pick-one decision tree + G-NEW-05 retro + us-east-1 pin reinforced) ✓ | PASS |
+| 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (managed SECURITY_HEADERS flagged POC-grade for finance + custom HSTS+CSP cross-ref + TLS pick-one cross-ref) ✓ | PASS |
 | 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK grant), F-AFIE-06 (log retention), F-AFIE-07 (missing-data treatment) | TBD |
 | 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (KMS cross-service grant pattern), F-AFIE-09 (identity scoping) | TBD |
 | 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (log retention) | TBD |
@@ -183,18 +183,43 @@ AWS doc verbatim: *"existing customers may lose access to Legacy models after 15
 
 ---
 
-### Finding F-AFIE-04 — HIGH (TLS pick-one-path + us-east-1 pin)
-**Partial:** `CDN_CLOUDFRONT_FOUNDATION.md` §3 + `LAYER_FRONTEND.md` §4
-**Issue (from AFIE F-PRT-01/02 + G-NEW-05):** Consumer's ms-09 portal stack defaulted to plain-HTTP ALB with the CloudFront/WAF/ACM edge stack inert behind a context flag. Worse: G-NEW-05 found that *enabling both* ALB cert + CloudFront origin lockdown is broken — CloudFront's port-80 origin fetch receives the ALB's 301 redirect and the edge path fails. The canonical partial documents both paths but doesn't gate them as alternatives.
+### Finding F-AFIE-04 — HIGH (TLS pick-one-path + us-east-1 pin + HSTS profile) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `CDN_CLOUDFRONT_FOUNDATION.md` §3 + `LAYER_FRONTEND.md` §3.1
+
+**Issue (from AFIE F-PRT-01/02 + G-NEW-05):** Consumer's ms-09 portal stack defaulted to plain-HTTP ALB with the CloudFront/WAF/ACM edge stack inert behind a context flag. Worse: G-NEW-05 found that *enabling both* ALB cert + CloudFront origin lockdown is broken — CloudFront's port-80 origin fetch receives the ALB's 301 redirect and the edge path fails (502 Bad Gateway intermittent). The canonical partial documents both paths but doesn't gate them as mutually exclusive alternatives.
 Additionally (F-PRT-03): CLOUDFRONT-scope WAF Web ACL + ACM cert MUST be in us-east-1; consumer's stack relied on default region defaulting to us-east-1.
-**Evidence:** TBD — MCP fetch of CloudFront docs + Sprint 11 implementation `infra/bin/afie-app.ts` synth-time assertion (works).
-**Recommended fix:**
-1. Canonical TLS-pick-one-path decision tree at top of §3
-2. Optional synth-time assertion pattern (refers to `_assertions/cdk_synth_guards.md` from F-AFIE-22)
-3. Explicit us-east-1 pin example for CLOUDFRONT-scope resources
-4. HSTS + security-headers response policy as canonical default
-**MCP audit sources:** TBD
-**grep -r sweep:** TBD
+Additionally (F-FRT-09, finance-grade HSTS): LAYER_FRONTEND §3 used `cf.ResponseHeadersPolicy.SECURITY_HEADERS` managed policy, which includes HSTS at only 1-year max-age with NO `includeSubDomains` / NO `preload` / NO CSP. Acceptable for POC, insufficient for finance/auth-bearing prod.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html — confirms ACM cert MUST be in us-east-1 for CloudFront viewer-cert use.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html — confirms CloudFront ResponseHeadersPolicy native `strict_transport_security` configuration (Origin override semantics + per-header settings).
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/waf/latest/developerguide/cloudfront-features.html — confirms CLOUDFRONT-scope Web ACL semantics; WAFv2 CLOUDFRONT scope is a global resource created via us-east-1 only.
+
+**Fix applied:**
+
+1. **`CDN_CLOUDFRONT_FOUNDATION.md` §3.0** (NEW subsection inserted at top of §3) — TLS pick-one decision tree:
+   - Path A (edge-only TLS): CANONICAL for static + API edge — ALB listener cert + redirect MUST be off
+   - Path B (end-to-end TLS): for public ALB with multiple ingress paths — `OriginProtocolPolicy.HTTPS_ONLY` mandatory
+   - AFIE G-NEW-05 retro inlined: explains the 502 Bad Gateway mode when both paths are enabled
+   - Forward-reference to F-AFIE-22 synth-time guard `assert_cloudfront_tls_path_single`
+   - Region pin reminder: ACM cert + WAFv2 CLOUDFRONT-scope WebACL + `CdnStack(env=Environment(region="us-east-1"))` MUST all align
+   - Inline AWS doc URL citation
+   - Header bumped to **v2.1** (Last-reviewed 2026-06-17) with R4 update banner
+
+2. **`LAYER_FRONTEND.md` §3.1 gotchas** — reinforced:
+   - Managed `SECURITY_HEADERS` policy flagged POC-grade (only 1y HSTS, no subdomains/preload/CSP); for finance/regulated apps, cross-ref `CDN_CLOUDFRONT_FOUNDATION.md` §3 lines 203-215 for the canonical custom policy
+   - us-east-1 ACM doc URL cited inline
+   - TLS pick-one-path cross-ref to `CDN_CLOUDFRONT_FOUNDATION.md` §3.0 with AFIE G-NEW-05 traceability
+   - Header bumped to **v2.1** (Last-reviewed 2026-06-17) with R4 update banner
+
+**Recommended next steps (deferred to F-AFIE-22, the synth-guard assertion library):** Add `assert_cloudfront_tls_path_single` rule + `assert_cloudfront_resources_in_us_east_1` rule.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html — ACM us-east-1 mandate (read 2026-06-17)
+- https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html — ResponseHeadersPolicy semantics (read 2026-06-17)
+- https://docs.aws.amazon.com/waf/latest/developerguide/cloudfront-features.html — CLOUDFRONT-scope Web ACL semantics (read 2026-06-17)
+
+**grep -r sweep (deferred to Tier 8 Hours 42-46):** scan `prompt_templates/partials/`, `kits/`, `templates/composite/` for any CloudFront `Distribution` construct without an explicit `Environment(region="us-east-1")` or that uses `ResponseHeadersPolicy.SECURITY_HEADERS` (the managed policy) for finance-class apps.
 
 ---
 
@@ -311,4 +336,48 @@ Populated as Tier 1-4 fixes ship.
                  authorizer to HttpNoneAuthorizer." → confirms SERVERLESS_HTTP_API_COGNITO
                  §5 already follows the canonical-correct pattern; R4 only annotates intent.
    findings backed: F-AFIE-03 (SERVERLESS_HTTP_API_COGNITO §5 canonical-pattern annotation)
+```
+
+---
+
+### Hour 10 — F-AFIE-04 MCP citations
+
+```
+[10:00] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "CloudFront WAF Web ACL us-east-1 region requirement"
+   search_intent: Confirm CLOUDFRONT-scope WAF Web ACL must be deployed in us-east-1
+   result rank 1: https://docs.aws.amazon.com/waf/latest/developerguide/cloudfront-features.html
+   findings backed: F-AFIE-04 (CDN_CLOUDFRONT_FOUNDATION §3.0 region pin)
+
+[10:05] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "CloudFront response headers policy HSTS strict transport security"
+   search_intent: Find canonical CloudFront ResponseHeadersPolicy pattern for HSTS
+   result rank 2: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html
+   findings backed: F-AFIE-04 (LAYER_FRONTEND §3.1 finance-grade HSTS gotcha)
+
+[10:15] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html
+   max_length: 3500 (ACM region requirement section retrieved)
+   key passage: "To use a certificate in AWS Certificate Manager (ACM) to require HTTPS
+                 between viewers and CloudFront, make sure you request (or import) the
+                 certificate in the US East (N. Virginia) Region (us-east-1)."
+   findings backed: F-AFIE-04 (us-east-1 ACM pin reinforced in both partials)
+
+[10:25] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html
+   max_length: 5000 + 5000 (start_index 10000) chunks
+   key passage: Security headers (HSTS via strict_transport_security, X-Frame-Options,
+                 X-Content-Type-Options, Referrer-Policy, CSP, X-XSS-Protection) +
+                 Origin override semantics. Confirms managed SECURITY_HEADERS preset is
+                 less restrictive than a custom policy (no CSP, shorter HSTS).
+   findings backed: F-AFIE-04 (LAYER_FRONTEND §3.1 finance-grade HSTS cross-ref)
+
+[10:30] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/waf/latest/developerguide/cloudfront-features.html
+   max_length: 4000 (CloudFront + WAF integration overview retrieved)
+   key passage: "AWS WAF inspects web requests for both distribution types based on
+                 the rules you define in your protection packs (web ACLs)." → confirms
+                 WAFv2 CLOUDFRONT scope is the canonical L7 protection layer; must be
+                 created in us-east-1 to attach to CloudFront distributions.
+   findings backed: F-AFIE-04 (CDN_CLOUDFRONT_FOUNDATION §3.0 region pin for WAFv2)
 ```
