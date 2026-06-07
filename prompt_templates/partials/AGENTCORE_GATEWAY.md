@@ -1,6 +1,10 @@
 # SOP — Bedrock AgentCore Gateway (MCP Endpoint, Lambda Targets, Runtime Proxy)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-12):** Added `Condition: StringEquals { aws:ResourceTag/Project: "{project_name}" }` to all three wildcard-resource grant statements in both §3 Monolith + §4 Micro-Stack:
+- `lambda:InvokeFunction` on `function:{project_name}-*`
+- `bedrock-agentcore:GetPolicyEngine / AuthorizeAction / PartiallyAuthorizeActions` on `policy-engine/*` + `gateway/*`
+The naming-prefix is convenience; the tag-condition is the security boundary. AFIE Sprint 10 F-GOV-09 retro applies (cross-project blast radius). §3.7 gotcha codifies the lesson + forward-ref to F-AFIE-22 synth-guard `assert_gateway_role_carries_project_tag_condition`.
 **Applies to:** AWS CDK v2 (Python 3.12+) · L1 `aws_bedrockagentcore.CfnGateway` / `CfnGatewayTarget` · Lambda Python 3.13 · ARM64 (Graviton) · `mcp` Python SDK ≥ 1.8 · `httpx` ≥ 0.27
 
 ---
@@ -53,12 +57,17 @@ def _create_gateway(self) -> agentcore.CfnGateway:
         role_name="{project_name}-gateway-role",
         assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
     )
-    # Invoke any Lambda with the project prefix (Gateway targets)
+    # F-AFIE-12: invoke any Lambda with the project prefix AND project tag.
+    # The prefix is convenience; the tag is the security boundary. AFIE Sprint 10
+    # F-GOV-09 retro applies here too — without the tag condition, a teammate's
+    # dev Lambda named with the project prefix could be invoked by the gateway.
     gateway_role.add_to_policy(iam.PolicyStatement(
         actions=["lambda:InvokeFunction"],
         resources=[f"arn:aws:lambda:{Aws.REGION}:{Aws.ACCOUNT_ID}:function:{{project_name}}-*"],
+        conditions={"StringEquals": {"aws:ResourceTag/Project": "{project_name}"}},
     ))
     # Cedar policy-engine access (only if using AGENTCORE_AGENT_CONTROL)
+    # F-AFIE-12: same tag-condition scope-down on policy-engine + gateway resources.
     gateway_role.add_to_policy(iam.PolicyStatement(
         sid="PolicyEngineAccess",
         actions=[
@@ -70,6 +79,7 @@ def _create_gateway(self) -> agentcore.CfnGateway:
             f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:policy-engine/*",
             f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:gateway/*",
         ],
+        conditions={"StringEquals": {"aws:ResourceTag/Project": "{project_name}"}},
     ))
 
     gateway = agentcore.CfnGateway(
@@ -331,6 +341,7 @@ gateway_client = MCPClient(lambda: create_gateway_transport(os.environ['GATEWAY_
 - **`credentialProviderType: "GATEWAY_IAM_ROLE"`** is the default for IAM-authed gateways. If you switch to OAuth2 for federated access, the value changes — don't leave both configured.
 - **Resource-based policy on every Lambda target** — the `AllowAgentCoreInvoke` permission is required **in addition to** `grant_invoke(gateway_role)`. Missing it gives `AccessDenied` at invoke time with no synth warning.
 - **`attr_gateway_identifier` ≠ `attr_gateway_arn`.** Targets reference the *identifier* (a short string), not the ARN.
+- **R4 / F-AFIE-12: tag-condition is the security boundary** for `lambda:InvokeFunction` and `bedrock-agentcore:*` on policy-engine + gateway resources. The `function:{project_name}-*` ARN pattern is naming convenience; `Condition: StringEquals { aws:ResourceTag/Project }` is what prevents a teammate's same-prefix-named dev Lambda from being invoked. AFIE Sprint 10 F-GOV-09 retro applies here too. Forward-ref to F-AFIE-22 synth-guard `assert_gateway_role_carries_project_tag_condition`.
 
 ---
 
@@ -389,9 +400,11 @@ class GatewayStack(cdk.Stack):
             role_name="{project_name}-gateway-role",
             assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         )
+        # F-AFIE-12: see §3 for the AFIE F-GOV-09 retro. Tag condition is the boundary.
         gateway_role.add_to_policy(iam.PolicyStatement(
             actions=["lambda:InvokeFunction"],
             resources=[f"arn:aws:lambda:{Aws.REGION}:{Aws.ACCOUNT_ID}:function:{{project_name}}-*"],
+            conditions={"StringEquals": {"aws:ResourceTag/Project": "{project_name}"}},
         ))
         gateway_role.add_to_policy(iam.PolicyStatement(
             sid="PolicyEngineAccess",
@@ -404,6 +417,7 @@ class GatewayStack(cdk.Stack):
                 f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:policy-engine/*",
                 f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:gateway/*",
             ],
+            conditions={"StringEquals": {"aws:ResourceTag/Project": "{project_name}"}},
         ))
         iam.PermissionsBoundary.of(gateway_role).apply(permission_boundary)
 

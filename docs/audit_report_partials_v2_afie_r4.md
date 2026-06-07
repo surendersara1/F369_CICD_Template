@@ -49,7 +49,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-01 (3-ARN Bedrock InvokeModel; landed 2026-06-16 as v2.1) + F-AFIE-09 (§3 `_create_agent_role` signature redesigned: needs_* booleans → required `*_arns: list[str]` + opt-in `permit_wildcard`) ✓ | PASS |
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (AllowFromPublic flipped True→False; source_vpce_ids required for non-dev; synth-time assert) ✓ | PASS |
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (§3.3 NEW post-deploy verify_security_baseline.py covering all 6 detective controls + §6 non-negotiable #6) ✓ | PASS |
-| 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (partial scoping for InvokeAgentRuntime/Gateway) | TBD |
+| 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (tag-condition added to lambda:InvokeFunction + policy-engine/* + gateway/* grants in §3 + §4; gotcha codified) ✓ | PASS |
 | 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (scale-to-zero default) | TBD |
 | 16 | DATA_DBT_REDSHIFT_SERVERLESS (or new) | TBD | F-AFIE-14 (4 RPU base) | TBD |
 | 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (Fargate Spot for dev) | TBD |
@@ -476,7 +476,41 @@ Canonical partial §3.1 used `needs_gateway: bool` / `needs_sub_agents: bool` / 
 
 ---
 
-### Finding F-AFIE-12 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-12 — HIGH (gateway role wildcards need tag-condition boundary) — RESOLVED 2026-06-17
+**Partial fixed:** `AGENTCORE_GATEWAY.md` §3.1 + §4.2 + §3.7
+
+**Issue (from AFIE Sprint 10 F-GOV-09 HIGH — applies here as well as in AGENTCORE_IDENTITY):** The gateway role grants 3 wildcard-resource statements:
+- `lambda:InvokeFunction` on `arn:aws:lambda:...:function:{project_name}-*` (naming-prefix wildcard)
+- `bedrock-agentcore:GetPolicyEngine / AuthorizeAction / PartiallyAuthorizeActions` on `policy-engine/*` and `gateway/*`
+
+The function-name prefix is a *naming convention* not a *security boundary*. A teammate's prototype Lambda named with the same prefix can be invoked by the gateway role, identical mode to the F-GOV-09 finding fixed in F-AFIE-09. The policy-engine and gateway wildcards have the same blast radius — any policy engine / gateway in the account can be authorized against.
+
+**Evidence (verified live this session via library inspection):**
+- `AGENTCORE_GATEWAY.md` §3.1 lines 57-73 — confirmed wildcards in both `lambda:InvokeFunction` and `PolicyEngineAccess` statements with no tag condition.
+- §4.2 lines 392-407 — same pattern in Micro-Stack variant.
+
+**Fix applied:**
+
+1. **§3.1 Monolith gateway role** — added `conditions={"StringEquals": {"aws:ResourceTag/Project": "{project_name}"}}` to both:
+   - `lambda:InvokeFunction` policy statement
+   - `PolicyEngineAccess` SID with `policy-engine/*` + `gateway/*` resources
+   - Inline F-AFIE-12 retro comment + cross-ref to AFIE F-GOV-09.
+
+2. **§4.2 Micro-Stack `GatewayStack`** — same tag-condition added to both equivalent statements. Inline comment refers to §3 for the AFIE retro.
+
+3. **§3.7 Monolith gotchas** — new entry codifying the lesson: ARN-prefix is naming convenience; tag-condition is the security boundary. Forward-ref to F-AFIE-22 synth-guard `assert_gateway_role_carries_project_tag_condition`.
+
+**Header bumped:** AGENTCORE_GATEWAY 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_gateway_role_carries_project_tag_condition` — fails synth if `AWS::IAM::Role` named `*-gateway-role` has any `lambda:InvokeFunction` or `bedrock-agentcore:*` statement without an `aws:ResourceTag/Project` Condition.
+
+**MCP audit sources:** Used library inspection + tag-based ABAC reference (https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html). No new MCP doc-read required — same canonical pattern as F-AFIE-09.
+
+**grep -r sweep (deferred to Tier 8):** scan for any `lambda:InvokeFunction` statement with `function:*-*` resource and no tag condition; scan for `bedrock-agentcore:GetPolicyEngine` with `policy-engine/*` and no tag condition.
+
+---
+
+### Finding F-AFIE-13 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
