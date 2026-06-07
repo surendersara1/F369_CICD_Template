@@ -1,6 +1,7 @@
 # SOP — Org-wide Security Hub + GuardDuty + Inspector + Macie + Detective (delegated admin · finding aggregation · SIEM export)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-11):** Added §3.3 NEW — post-deploy live-readonly verification script `verify_security_baseline.py` that checks all 6 detective controls (SecurityHub Hub status + AutoEnableControls, GuardDuty detector + 4 required features, Inspector2 org auto-enable for ec2/ecr/lambda, Macie session status, Detective graph existence, Access Analyzer ORG + ORG_UNUSED_ACCESS analyzers). MANDATORY in deploy pipeline. AFIE Sprint 10 F-SEC-05 retro: CFN success on Inspector2 EnableForOrganization masked an actual silent failure for 6 weeks. §6 non-negotiables gains #6 codifying the mandate. Cross-ref to F-AFIE-23 net-new partial OPS_LIVE_READONLY_MCP_AUDIT.md (pending Tier 5).
 **Applies to:** AWS CDK v2 (Python 3.12+) · Security Hub Central Configuration (2024) · GuardDuty (Foundational + EKS Audit + EKS Runtime + S3 + Lambda + RDS + EBS Malware) · Inspector v2 (EC2 + ECR + Lambda + Lambda Code) · Macie · Detective · Access Analyzer · Audit Manager · CSPM via PCI/CIS standards
 
 ---
@@ -282,6 +283,98 @@ class SecurityAuditStack(Stack):
         # Already covered in ENTERPRISE_CENTRALIZED_LOGGING via CfnAwsLogSource
 ```
 
+### 3.3 Post-deploy live-readonly verification (F-AFIE-11 — MANDATORY)
+
+**CFN deploy success ≠ services actually enabled.** AFIE Sprint 10 F-SEC-05 retro: ms-09 deployed the SecurityAuditStack; CFN reported success on every resource; `inspector2:EnableForOrganization` actually failed silently because an existing-account delegated-admin state blocked it; Inspector2 was disabled for the org for 6 weeks before a compliance review noticed. Every consumer MUST run the verification script below as part of the deploy pipeline.
+
+```python
+# scripts/verify_security_baseline.py
+# RUN AS THE AUDIT ACCOUNT DELEGATED ADMIN. Returns non-zero exit if any check fails.
+import boto3, sys
+
+REGION = "us-east-1"   # change per deploy region
+ALL_REGIONS = ["us-east-1", "us-west-2", "eu-west-1"]
+
+failures: list[str] = []
+
+# 1. Security Hub — Hub is ENABLED + AutoEnableControls = True
+sh = boto3.client("securityhub", region_name=REGION)
+try:
+    hub = sh.describe_hub()
+    if not hub.get("AutoEnableControls"):
+        failures.append("SecurityHub: AutoEnableControls is False — controls won't propagate")
+except sh.exceptions.InvalidAccessException:
+    failures.append("SecurityHub: not enabled in audit account")
+
+# 2. GuardDuty — detector exists + status ENABLED + S3-protection + Malware-protection on
+gd = boto3.client("guardduty", region_name=REGION)
+detectors = gd.list_detectors().get("DetectorIds", [])
+if not detectors:
+    failures.append("GuardDuty: no detector in audit account")
+else:
+    det = gd.get_detector(DetectorId=detectors[0])
+    if det.get("Status") != "ENABLED":
+        failures.append(f"GuardDuty: detector status {det.get('Status')}, not ENABLED")
+    enabled_features = {f["Name"] for f in det.get("Features", []) if f.get("Status") == "ENABLED"}
+    for required in ("S3_DATA_EVENTS", "EKS_AUDIT_LOGS", "MALWARE_PROTECTION", "RDS_LOGIN_EVENTS"):
+        if required not in enabled_features:
+            failures.append(f"GuardDuty: feature {required} not enabled")
+
+# 3. Inspector2 — all workload accounts ENABLED (this is the AFIE F-SEC-05 silent-fail target)
+insp = boto3.client("inspector2", region_name=REGION)
+try:
+    org_config = insp.describe_organization_configuration()
+    if not org_config.get("autoEnable", {}).get("ec2"):
+        failures.append("Inspector2: autoEnable.ec2 is False — new accounts won't be scanned")
+    if not org_config.get("autoEnable", {}).get("ecr"):
+        failures.append("Inspector2: autoEnable.ecr is False — new accounts won't be scanned")
+    if not org_config.get("autoEnable", {}).get("lambda"):
+        failures.append("Inspector2: autoEnable.lambda is False — new accounts won't be scanned")
+except Exception as e:
+    failures.append(f"Inspector2: describe_organization_configuration failed — {e}")
+
+# 4. Macie — session status ENABLED for delegated admin
+macie = boto3.client("macie2", region_name=REGION)
+try:
+    sess = macie.get_macie_session()
+    if sess.get("status") != "ENABLED":
+        failures.append(f"Macie: session status {sess.get('status')}, not ENABLED")
+except Exception as e:
+    failures.append(f"Macie: get_macie_session failed — {e}")
+
+# 5. Detective — at least one graph exists
+det = boto3.client("detective", region_name=REGION)
+graphs = det.list_graphs().get("GraphList", [])
+if not graphs:
+    failures.append("Detective: no investigation graph found")
+
+# 6. Access Analyzer — both external + unused-access analyzers exist
+aa = boto3.client("accessanalyzer", region_name=REGION)
+analyzers = aa.list_analyzers().get("analyzers", [])
+types = {a.get("type") for a in analyzers}
+for required_type in ("ORGANIZATION", "ORGANIZATION_UNUSED_ACCESS"):
+    if required_type not in types:
+        failures.append(f"AccessAnalyzer: type {required_type} not found")
+
+if failures:
+    print("VERIFY FAILED:")
+    for f in failures:
+        print(f"  - {f}")
+    sys.exit(1)
+print("VERIFY OK — all 6 detective controls are live and configured.")
+```
+
+**Pipeline integration:** wire this into `cdk deploy` post-step. Suggested in CI:
+```yaml
+# .github/workflows/deploy-security-baseline.yml
+- name: Deploy SecurityAuditStack
+  run: cdk deploy SecurityAuditStack --require-approval never
+- name: Verify detective controls are live (F-AFIE-11)
+  run: python scripts/verify_security_baseline.py
+```
+
+**Cross-ref:** the dedicated partial `OPS_LIVE_READONLY_MCP_AUDIT.md` (NEW under F-AFIE-23 — pending Tier 5 Hours 30-36) will generalize this pattern to MCP-driven live audits across all security-relevant services. F-AFIE-11 ships the embedded inline script now; F-AFIE-23 will provide the standalone partial.
+
 ---
 
 ## 4. Common gotchas
@@ -373,6 +466,7 @@ def test_critical_findings_route_to_sns():
 3. **At minimum 4 standards subscribed**: AWS FSBP + CIS Benchmark v3 + PCI-DSS v4 + NIST 800-53 r5.
 4. **GuardDuty all 6 features auto-enabled org-wide** (S3 data events + EKS Audit + EKS Runtime + EBS Malware + RDS + Lambda).
 5. **Critical/High findings → SNS → on-call** (PagerDuty/Slack) within 15 min via EventBridge rule with input transformer.
+6. **R4 / F-AFIE-11: post-deploy live-readonly verification is mandatory.** CFN success does not equal "service enabled". Run `verify_security_baseline.py` (§3.3) after every deploy; the pipeline MUST fail on non-zero exit. AFIE Sprint 10 F-SEC-05 retro: Inspector2 was silently disabled for 6 weeks before a compliance review noticed. This is now non-negotiable.
 
 ---
 

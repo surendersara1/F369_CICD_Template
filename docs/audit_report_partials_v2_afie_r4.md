@@ -48,7 +48,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (validation_mode default flipped to VALIDATE + §3.2a canonical Cedar context envelope + DEFAULT_POLICY fail-closed deny-all + RbacLoadError raises instead of silent fallback) ✓ | PASS |
 | 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-01 (3-ARN Bedrock InvokeModel; landed 2026-06-16 as v2.1) + F-AFIE-09 (§3 `_create_agent_role` signature redesigned: needs_* booleans → required `*_arns: list[str]` + opt-in `permit_wildcard`) ✓ | PASS |
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (AllowFromPublic flipped True→False; source_vpce_ids required for non-dev; synth-time assert) ✓ | PASS |
-| 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (detective controls live-deploy step) | TBD |
+| 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (§3.3 NEW post-deploy verify_security_baseline.py covering all 6 detective controls + §6 non-negotiable #6) ✓ | PASS |
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (partial scoping for InvokeAgentRuntime/Gateway) | TBD |
 | 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (scale-to-zero default) | TBD |
 | 16 | DATA_DBT_REDSHIFT_SERVERLESS (or new) | TBD | F-AFIE-14 (4 RPU base) | TBD |
@@ -442,7 +442,41 @@ Canonical partial §3.1 used `needs_gateway: bool` / `needs_sub_agents: bool` / 
 
 ---
 
-### Finding F-AFIE-11 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-11 — HIGH (detective controls live-deploy verification) — RESOLVED 2026-06-17
+**Partial fixed:** `ENTERPRISE_SECURITY_HUB_GD_ORG.md` §3.3 NEW + §6 non-negotiable #6
+
+**Issue (from AFIE Sprint 10 F-SEC-05 HIGH):** ms-09 SecurityAuditStack deployed cleanly — CFN reported success on every resource including `inspector2:EnableForOrganization`. But Inspector2's enable was actually silently rejected at the API layer because an existing-account delegated-admin state blocked it. Inspector2 was disabled for the org for 6 weeks before a compliance review noticed the gap. The canonical partial covered the CFN code to enable the service but offered no post-deploy live verification, so the consumer had no way to catch the silent failure short of a manual review.
+
+**Evidence (verified live this session via library inspection):** Canonical partial §3.1 + §3.2 covered Security Hub Hub, GuardDuty Detector, Inspector2 OrganizationConfiguration, Macie Session, Detective Graph, Access Analyzer Analyzer (×2) via CFN constructs but had no section dedicated to verifying the enable state took effect.
+
+**Fix applied:**
+
+1. **§3.3 NEW subsection — `verify_security_baseline.py`** — full Python script that uses boto3 to:
+   - `securityhub.describe_hub()` — fails if Hub not enabled or AutoEnableControls=False
+   - `guardduty.list_detectors() + get_detector()` — fails if no detector, status≠ENABLED, or any of S3_DATA_EVENTS / EKS_AUDIT_LOGS / MALWARE_PROTECTION / RDS_LOGIN_EVENTS feature isn't enabled
+   - `inspector2.describe_organization_configuration()` — fails if autoEnable.ec2 / .ecr / .lambda is False (the AFIE F-SEC-05 root-cause target)
+   - `macie2.get_macie_session()` — fails if status≠ENABLED
+   - `detective.list_graphs()` — fails if no graph
+   - `accessanalyzer.list_analyzers()` — fails if either ORGANIZATION or ORGANIZATION_UNUSED_ACCESS analyzer types are missing
+   - Exits non-zero with explicit failure list; prints OK on success.
+
+2. **§3.3 Pipeline integration** — example GitHub Actions step pairing `cdk deploy SecurityAuditStack` with `python scripts/verify_security_baseline.py`. Pipeline MUST fail on non-zero exit.
+
+3. **§6 non-negotiable #6** — codifies the live-readonly verification mandate + AFIE F-SEC-05 retro inline.
+
+4. **Cross-ref to F-AFIE-23 (net-new partial)** — `OPS_LIVE_READONLY_MCP_AUDIT.md` (pending Tier 5 Hours 30-36) will generalize this pattern across all security-relevant services; F-AFIE-11 ships the embedded inline script for the most-critical detective-controls case now.
+
+**Header bumped:** ENTERPRISE_SECURITY_HUB_GD_ORG 2.0 → 2.1.
+
+**Recommended next steps:** F-AFIE-23 (OPS_LIVE_READONLY_MCP_AUDIT) generalizes the verify-step pattern; F-AFIE-22 (synth-guards) cannot enforce this directly (it's a runtime check) but can enforce that every `enterprise/` and `devops/security/` composite chains `verify_security_baseline.py` as a post-deploy step.
+
+**MCP audit sources:** Used library inspection + canonical detective-controls live-readonly API surface (boto3 docs for securityhub / guardduty / inspector2 / macie2 / detective / accessanalyzer). No new MCP doc-read required since the failure mode is a CFN-vs-API-state divergence that doesn't have a single canonical AWS doc page.
+
+**grep -r sweep (deferred to Tier 8):** scan `kits/` and `templates/composite/` for any composite that deploys SecurityAuditStack without a paired verification step.
+
+---
+
+### Finding F-AFIE-12 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
