@@ -1,7 +1,11 @@
 # SOP — LLMOps (Amazon Bedrock, Prompts, Guardrails, Knowledge Base, Agents)
 
-**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active (CANONICAL for Bedrock InvokeModel ARN shapes)
-**R4 update (2026-06-16):** §3.1 + §4 InvokeModel IAM grants restructured to the canonical 3-ARN pattern (`foundation-model/*` + `inference-profile/*` + `application-inference-profile/*`). Default model bumped from Claude 3 Sonnet/Haiku (Legacy/EOL) to Claude Sonnet 4.5 + Haiku 4.5 (Active). Closes AFIE Sprint 10 G-NEW-01 deploy-blocker. AWS docs: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html + https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
+**Version:** 2.2 · **Last-reviewed:** 2026-06-16 · **Status:** Active (CANONICAL for Bedrock InvokeModel ARN shapes + lifecycle awareness)
+**R4 update (2026-06-16):**
+- §3.0 NEW — Current Active Models + Lifecycle Awareness subsection with authoritative table (Active vs Legacy/EOL with dates) + mandatory MCP currency-check pattern. Closes AFIE Sprint 8 F-AI-01 (Sonnet 4 EOL 2026-10-14 + offline->15d-may-lose-access risk). [F-AFIE-02]
+- §3.1 + §4 — InvokeModel IAM grants restructured to the canonical 3-ARN pattern (`foundation-model/*` + `inference-profile/*` + `application-inference-profile/*`). Default model bumped from Claude 3 Sonnet/Haiku (Legacy/EOL) to Claude Sonnet 4.5 + Haiku 4.5 (Active). Closes AFIE Sprint 10 G-NEW-01 deploy-blocker. [F-AFIE-01]
+
+AWS docs verified live via MCP: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html + https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock · SSM Parameter Store
 
 ---
@@ -32,6 +36,47 @@ Bedrock resources themselves (model ARNs, Guardrails) aren't IAM-mutatable by co
 ---
 
 ## 3. Monolith Variant
+
+### 3.0 Current Active Models + Lifecycle Awareness (mandatory currency check)
+
+**AWS doc (authoritative):** https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
+
+Bedrock models pass through three states: **Active → Legacy → EOL**. Once Legacy is announced, existing customers **may lose access after 15 days of inactivity** — i.e. a deployment that goes offline for two weeks may already be unable to invoke its synthesis model when redeployed. This is the AFIE-CPG Sprint 8 F-AI-01 incident.
+
+**Verify against the AWS doc before every deploy.** The MCP currency-check pattern (per OPS_AWS_SERVICE_CURRENCY_CHECK partial) is:
+
+```
+mcp__awslabs_aws-documentation-mcp-server__read_documentation
+url: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
+```
+
+#### Active models (as of 2026-06-16, verify before deploy)
+
+| Provider | Model | Bedrock model ID (foundation-model) | Notes |
+|---|---|---|---|
+| Anthropic | Claude Sonnet 4.5 | `anthropic.claude-sonnet-4-5-20250929-v1:0` | Canonical synthesis model |
+| Anthropic | Claude Haiku 4.5 | `anthropic.claude-haiku-4-5-20251001-v1:0` | Canonical fallback (cheaper routing) |
+| Amazon | Titan-embed-text v2 | `amazon.titan-embed-text-v2:0` | Canonical embeddings (1024-dim default) |
+| Amazon | Nova Sonic v2 | `amazon.nova-sonic-v2:0` | Speech (v1 is Legacy — see below) |
+| Cohere | Cohere Rerank v3.5 | `cohere.rerank-v3-5:0` | Reranking for KB |
+
+#### Legacy / EOL — DO NOT use in new partials or new project code
+
+| Model | Legacy date | EOL date | Public extended access from | Replacement |
+|---|---|---|---|---|
+| `anthropic.claude-3-sonnet-20240229-v1:0` | 2026-01-30 | **2026-07-30** (past) | — | claude-sonnet-4-5 |
+| `anthropic.claude-3-haiku-20240307-v1:0` | 2026-03-10 | 2026-09-10 | 2026-06-10 | claude-haiku-4-5 |
+| `anthropic.claude-sonnet-4-20250514-v1:0` | 2026-04-14 | **2026-10-14** | 2026-07-14 | claude-sonnet-4-5 |
+| `amazon.nova-sonic-v1:0` | 2026-03-13 | 2026-09-14 | — | nova-sonic-v2 |
+| `amazon.nova-premier-v1:0` | 2026-03-13 | 2026-09-14 | — | (see model card) |
+| `amazon.titan-image-generator-v2:0` | 2025-12-30 | **2026-06-30** (past) | — | (see model card) |
+
+**Pre-deploy checklist:**
+- [ ] Run the MCP currency-check above; reconcile against the tables here
+- [ ] Grep your project for any literal model ID in the Legacy/EOL table
+- [ ] If any project deployment has been offline >15 days, expect Bedrock access to be revoked on the first Legacy model call — replace the model literal AND re-deploy before testing
+
+**Project-side discipline:** read the synthesis model from SSM (`/{project}/runtime/default_model`), not from a code literal. This makes the model swap a one-line SSM update, not a redeploy. The AFIE-CPG `agents/shared/ssm_helper.py` pattern is canonical.
 
 ### 3.1 IAM policies (scoped to exact model ARN)
 

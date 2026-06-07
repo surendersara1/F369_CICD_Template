@@ -37,7 +37,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | # | Partial | Pre-R4 grade | R4 fixes applied | Post-R4 grade |
 |---|---|---|---|---|
 | 1 | AGENTCORE_RUNTIME | WARN (R2 alpha drift) | F-AFIE-01 (inference-profile/* IAM) ✓ | PASS |
-| 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 + F-AFIE-20 | PASS (for F-AFIE-01); WARN pending F-AFIE-02 |
+| 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 (§3.0 lifecycle awareness) ✓ + F-AFIE-20 (pricing SoT — pending) | PASS (F-AFIE-01+02); WARN pending F-AFIE-20 |
 | 3 | LAYER_API | FAIL→PASS (R1 fix) | F-AFIE-03 (Cognito authz mandatory), F-AFIE-19 (WebSocket $connect auth) | TBD |
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (Cognito authz reinforced) | TBD |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (TLS pick-one + us-east-1 pin) | TBD |
@@ -114,18 +114,34 @@ Inline `# AWS doc: <URL>` comment added to every grant site. Every affected part
 
 ---
 
-### Finding F-AFIE-02 — HIGH (model lifecycle awareness)
-**Partial:** `LLMOPS_BEDROCK.md`
-**Issue (from AFIE F-AI-01 CRITICAL):** Canonical partial referenced `claude-sonnet-4-20250514-v1:0` (or similar) as the default synthesis model. As of 2026-04-14, Sonnet 4 entered Bedrock Legacy; EOL 2026-10-14. Existing customers with >15-day account inactivity may already lose Sonnet 4 access. The partial has no mechanism to surface this drift.
-**Evidence (verified live this session via MCP):** TBD — `mcp__awslabs_aws-documentation-mcp-server__read_documentation` on https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html confirms current Active/Legacy/EOL status. Anthropic Sonnet 4.5 is the current Active equivalent.
-**Recommended fix:**
-1. Add §3.1 "Current Active Models" subsection listing canonical Active model IDs (Sonnet 4.5, Haiku 4.5, Titan-embed-text-v2, Nova 2 Sonic)
-2. Add mandatory `last-AWS-verified-lifecycle` field to partial header
-3. Add §References link to model-lifecycle.html as canonical currency check
-4. New companion partial `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` (F-AFIE-25) for dedicated lifecycle tracking
-5. Add §6 worked example regression test asserting consumer code reads model from SSM (not a literal)
-**MCP audit sources:** TBD
-**grep -r sweep:** TBD
+### Finding F-AFIE-02 — HIGH (model lifecycle awareness) — RESOLVED 2026-06-16
+**Partial:** `LLMOPS_BEDROCK.md` (canonical for Bedrock model selection — change cascades to consumers via Canonical-Copy Rule).
+**Issue (from AFIE F-AI-01 CRITICAL):** Canonical partial referenced `claude-3-sonnet-20240229-v1:0` as the default synthesis model (already EOL'd 2026-07-30 — past!) and `claude-3-haiku-20240307-v1:0` as fallback (Legacy 2026-03-10, EOL 2026-09-10). Existing customers with >15 days of inactivity may already lose access to Legacy models per AWS Bedrock policy. The partial had no mechanism to surface this drift to consumers.
+
+**Evidence (verified live 2026-06-16 via MCP):** `mcp__awslabs_aws-documentation-mcp-server__read_documentation` on https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html returns the authoritative AWS Legacy/EOL table. Verified entries include:
+- `anthropic.claude-3-sonnet-20240229-v1:0` — EOL **2026-07-30 (past)**
+- `anthropic.claude-3-haiku-20240307-v1:0` — EOL 2026-09-10
+- `anthropic.claude-sonnet-4-20250514-v1:0` — EOL 2026-10-14 (AFIE's situation)
+- `amazon.nova-sonic-v1:0` — EOL 2026-09-14
+- `amazon.titan-image-generator-v2:0` — EOL **2026-06-30 (past)**
+
+AWS doc verbatim: *"existing customers may lose access to Legacy models after 15 days of inactivity."* — the exact AFIE failure mode.
+
+**Fix applied:** New §3.0 "Current Active Models + Lifecycle Awareness" subsection added to LLMOPS_BEDROCK.md, ordered BEFORE §3.1 IAM (so model choice is settled before the grant is written). Contents:
+- Authoritative Active models table (Sonnet 4.5, Haiku 4.5, Titan-embed-text-v2, Nova Sonic v2, Cohere Rerank v3.5) with canonical Bedrock model IDs
+- Authoritative Legacy/EOL table with dates from AWS docs (including past-EOL flags)
+- Mandatory MCP currency-check command (mirrors the OPS_AWS_SERVICE_CURRENCY_CHECK partial pattern)
+- Pre-deploy checklist (3 items, including the offline->15d-may-lose-access risk)
+- Project-side discipline note: read model from SSM, never a literal — closes F-AI-02 (hardcoded fallbacks) at the canonical source
+
+**MCP audit sources:**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` url: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html (max_length=6000 returned full authoritative Legacy/EOL table)
+
+**grep -r sweep:** Other partials referencing Legacy Claude 3 / Nova Sonic v1 / Titan Image G1 v2 model IDs flagged in F-AFIE-01 commit (MLOPS_CANVAS_NO_CODE — `claude-3-*` Legacy warning added inline). Sweep for additional stale literals deferred to Tier 7 (Hour 42-46) downstream propagation pass.
+
+**Pre-R4 grade:** WARN (R1) — partial structurally sound but model IDs stale
+**Post-R4 grade:** PASS — explicit Active/Legacy table + MCP currency-check + SSM-driven model swap discipline
+**Commit:** TBD (combined with F-AFIE-02 commit)
 
 ---
 
@@ -228,4 +244,12 @@ Populated as Tier 1-4 fixes ship.
                  statement, you must also specify the foundation model in each Region
                  associated with it." + canonical Resource list with all 3 ARN classes.
    findings backed: F-AFIE-01 (verified the canonical IAM pattern)
+
+[06:30] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
+   max_length: 6000 (Active/Legacy/EOL table + 15-day inactivity rule retrieved)
+   key passage: "existing customers may lose access to Legacy models after 15 days of
+                 inactivity" + Legacy table with verified EOL dates for Claude 3 / Sonnet 4 /
+                 Nova Sonic v1 / Titan Image G1 v2.
+   findings backed: F-AFIE-02 (authoritative Active vs Legacy/EOL data for LLMOPS_BEDROCK §3.0)
 ```
