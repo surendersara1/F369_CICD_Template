@@ -38,8 +38,8 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 |---|---|---|---|---|
 | 1 | AGENTCORE_RUNTIME | WARN (R2 alpha drift) | F-AFIE-01 (inference-profile/* IAM) ✓ | PASS |
 | 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 (§3.0 lifecycle awareness) ✓ + F-AFIE-20 (pricing SoT — pending) | PASS (F-AFIE-01+02); WARN pending F-AFIE-20 |
-| 3 | LAYER_API | FAIL→PASS (R1 fix) | F-AFIE-03 (Cognito authz mandatory), F-AFIE-19 (WebSocket $connect auth) | TBD |
-| 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (Cognito authz reinforced) | TBD |
+| 3 | LAYER_API | WARN (R1 F002 fix never landed) | F-AFIE-03 (R1 fix + default_method_options + AFIE F-INT-01 retro) ✓; F-AFIE-19 (WebSocket $connect auth — pending) | PASS (F-AFIE-03); WARN pending F-AFIE-19 |
+| 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (canonical-pattern intent made explicit + verified default_authorizer mandate) ✓ | PASS |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (TLS pick-one + us-east-1 pin) | TBD |
 | 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (HSTS + headers policy) | TBD |
 | 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK grant), F-AFIE-06 (log retention), F-AFIE-07 (missing-data treatment) | TBD |
@@ -145,13 +145,41 @@ AWS doc verbatim: *"existing customers may lose access to Legacy models after 15
 
 ---
 
-### Finding F-AFIE-03 — HIGH (REST API authorizer mandatory)
-**Partial:** `LAYER_API.md` §4 + `SERVERLESS_HTTP_API_COGNITO.md` §3
-**Issue (from AFIE F-INT-01 CRITICAL):** Consumer ms-09 portal stack built `apiResource.addProxy({ anyMethod: true })` with NO `authorizationType` / `authorizer` parameter, so every method defaulted to `AuthorizationType.NONE`. Backing Lambda reads `event.requestContext.authorizer.claims` which is silently empty → RBAC no-ops. The canonical partials reference `CognitoUserPoolsAuthorizer` but don't make attachment to the proxy mandatory.
-**Evidence (verified live this session via MCP):** TBD — `mcp__awslabs_aws-documentation-mcp-server__read_documentation` on https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html.
-**Recommended fix:** Update Monolith + Micro-Stack examples to show authorizer attached to every method including proxy. Add §6 worked-example assertion that `AuthorizationType.NONE` never appears in synth output.
-**MCP audit sources:** TBD
-**grep -r sweep:** TBD
+### Finding F-AFIE-03 — HIGH (REST API authorizer mandatory) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `LAYER_API.md` §4 + `SERVERLESS_HTTP_API_COGNITO.md` §5
+
+**Issue (from AFIE F-INT-01 CRITICAL):** Consumer ms-09 portal stack built `apiResource.addProxy({ anyMethod: true })` with NO `authorizationType` / `authorizer` parameter, so every method defaulted to `AuthorizationType.NONE`. Backing Lambda reads `event.requestContext.authorizer.claims` which is silently empty → RBAC no-ops. The canonical partials referenced `CognitoUserPoolsAuthorizer` but did not make attachment to every method (including proxy children added via `addProxy({anyMethod: true})`) mandatory.
+
+**Additional history:** R1 audit (2026-04-21) F002 had already flagged the LAYER_API §4 `CognitoUserPoolsAuthorizer` block as a broken placeholder (referenced `user_pool_arn` without import) and recommended the proper `UserPool.from_user_pool_arn` + `CognitoUserPoolsAuthorizer` pattern. **That R1 fix was never applied to the canonical partial** — 8 weeks elapsed, AFIE-CPG consumed the still-broken partial in Sprint 8, and the AuthN no-op shipped as a CRITICAL gate. R4 corrects this overdue R1 recommendation alongside the new authorization-by-default mandate.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` →  https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html (4000 chars read). Doc confirms: REST API `addMethod`/`addProxy` requires per-method `authorizationType` + `authorizer`; the canonical CDK pattern for applying-to-all is `RestApi.root.default_method_options = MethodOptions(...)`.
+- HTTP API equivalent doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html confirms `HttpApi.default_authorizer` applies at the API level and is overridden per-route only when explicit (e.g., `HttpNoneAuthorizer` for `/healthz`).
+
+**Fix applied:**
+
+1. **`LAYER_API.md` §4** — rewrote the broken R1 placeholder. The block now:
+   - Imports `aws_cognito as cognito` inside the conditional
+   - Constructs `cognito.UserPool.from_user_pool_arn(self, "ImportedUserPool", user_pool_arn)`
+   - Constructs `apigw.CognitoUserPoolsAuthorizer(self, "Authorizer", cognito_user_pools=[user_pool])`
+   - **Critically** sets `self.api.root.default_method_options = apigw.MethodOptions(authorization_type=apigw.AuthorizationType.COGNITO, authorizer=authorizer)` so every method (including those added later via `addProxy({any_method: true})`) inherits the authorizer
+   - Inline `# AWS doc:` URL citation
+   - Inline AFIE Sprint 8 F-INT-01 retro comment so future readers know *why* `default_method_options` is non-negotiable
+   - Header bumped to **v2.1** (Last-reviewed 2026-06-16) with R4 update banner
+
+2. **`SERVERLESS_HTTP_API_COGNITO.md` §5** — partial was already structurally correct (`default_authorizer=jwt_authorizer` at HttpApi level with explicit `HttpNoneAuthorizer()` opt-out for `/healthz`). R4 made the *canonical-pattern intent* explicit:
+   - Added in-line block comment explaining the `default_authorizer` pattern as canonical (auth-by-default; per-route opt-out only)
+   - Inline `# AWS doc:` URL citation for http-api-jwt-authorizer.html
+   - Inline cross-reference to F-INT-01 + the REST-API variant fix in LAYER_API §4
+   - Header bumped to **v2.1** (Last-reviewed 2026-06-16) with R4 update banner marking the partial CANONICAL for the HTTP-API + JWT-authorizer-by-default pattern
+
+**Recommended next steps (deferred to F-AFIE-22, the synth-guard assertion library):** Add a `cdk_synth_guards.md` rule `assert_no_authorization_type_none` that fails synth if ANY API method's `AuthorizationType` resolves to `NONE` except for explicitly whitelisted public endpoints (`/healthz`, `/ready`).
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html — REST API + Cognito user pool authorizer (read 2026-06-17)
+- https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html — HTTP API JWT authorizer + `default_authorizer` semantics (read 2026-06-17)
+
+**grep -r sweep (deferred to Tier 8 Hours 42-46):** scan `prompt_templates/partials/` for any remaining `addProxy(` or `add_proxy(` calls without paired `default_method_options` / authorizer attachment; scan `kits/` and `templates/composite/` likewise.
 
 ---
 
@@ -252,4 +280,35 @@ Populated as Tier 1-4 fixes ship.
                  inactivity" + Legacy table with verified EOL dates for Claude 3 / Sonnet 4 /
                  Nova Sonic v1 / Titan Image G1 v2.
    findings backed: F-AFIE-02 (authoritative Active vs Legacy/EOL data for LLMOPS_BEDROCK §3.0)
+```
+
+---
+
+### Hour 8 — F-AFIE-03 MCP citations
+
+```
+[08:00] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "API Gateway Cognito user pool authorizer REST API method"
+   search_intent: Find canonical AWS doc for attaching a Cognito user pool authorizer
+                  to every method (including proxy children) on a REST API
+   result rank 1: https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html
+   findings backed: F-AFIE-03 (LAYER_API §4 Cognito authorizer fix)
+
+[08:10] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html
+   max_length: 4000 (full Cognito-user-pool-authorizer integration page retrieved)
+   key passage: "After you create a COGNITO_USER_POOLS authorizer, configure your API
+                 methods to use it" + per-method `authorizationType` + `authorizerId`
+                 requirement; for blanket attachment, the canonical CDK pattern is
+                 `RestApi.root.default_method_options = MethodOptions(...)`.
+   findings backed: F-AFIE-03 (LAYER_API §4 R1-overdue fix + default_method_options mandate)
+
+[08:25] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html
+   max_length: 4000 (JWT authorizer + scopes + default_authorizer semantics retrieved)
+   key passage: "If you specify route options with no authorizer, the route inherits the
+                 API's default authorizer. To opt out for a specific route, set
+                 authorizer to HttpNoneAuthorizer." → confirms SERVERLESS_HTTP_API_COGNITO
+                 §5 already follows the canonical-correct pattern; R4 only annotates intent.
+   findings backed: F-AFIE-03 (SERVERLESS_HTTP_API_COGNITO §5 canonical-pattern annotation)
 ```

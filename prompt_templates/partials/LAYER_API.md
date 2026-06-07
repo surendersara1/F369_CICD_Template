@@ -1,6 +1,12 @@
 # SOP — API Layer (REST + WebSocket via API Gateway)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):**
+- Fixed R1-F002 broken `CognitoUserPoolsAuthorizer` placeholder (recommended fix never applied) — now imports user pool by ARN and instantiates authorizer correctly.
+- Added `RestApi.root.default_method_options = MethodOptions(authorization_type=COGNITO, authorizer=…)` to mandate authorizer attachment on EVERY method including those added via `addProxy({anyMethod:true})`. Closes AFIE Sprint 8 F-INT-01 (every `/api/*` route was internet-open because default was `AuthorizationType.NONE`).
+- Inline `# AWS doc:` comment cites https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html
+
+Note on CORS: `default_cors_preflight_options` defaults to `ALL_ORIGINS` — REQUIRES narrowing in prod via context flag (e.g., `-c apiCorsOrigins=https://portal.example.com`). AFIE F-INT-01 also flagged this.
 **Applies to:** AWS CDK v2 (Python 3.12+) · API Gateway REST v1 + WebSocket v2
 
 ---
@@ -173,17 +179,25 @@ class ApiStack(cdk.Stack):
 
         # Auth variant
         if use_cognito and user_pool_arn:
+            # AWS doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-integrate-with-cognito.html
+            # Cognito User Pool imported by ARN — safe cross-stack (no mutation; pure ref).
+            from aws_cdk import aws_cognito as cognito
+            user_pool = cognito.UserPool.from_user_pool_arn(
+                self, "ImportedUserPool", user_pool_arn,
+            )
             authorizer = apigw.CognitoUserPoolsAuthorizer(
                 self, "Authorizer",
-                cognito_user_pools=[
-                    # from_user_pool_arn does NOT cross-mutate; safe cross-stack
-                    apigw.CognitoUserPoolsAuthorizer  # placeholder; real import omitted
-                ],
+                cognito_user_pools=[user_pool],
             )
             auth_kwargs = {
                 "authorization_type": apigw.AuthorizationType.COGNITO,
                 "authorizer": authorizer,
             }
+            # AFIE Sprint 8 F-INT-01: ms-09 portal stack built apiResource.addProxy({anyMethod:true})
+            # WITHOUT authorizationType set, so every /api/* method defaulted to AuthorizationType.NONE.
+            # The handler then silently no-op'd RBAC (event.requestContext.authorizer.claims was empty).
+            # PREVENT: set RestApi.default_method_options + sanity-test addProxy in §6 worked example.
+            self.api.root.default_method_options = apigw.MethodOptions(**auth_kwargs)
         else:
             api_key = self.api.add_api_key("DefaultKey")
             usage_plan = self.api.add_usage_plan(

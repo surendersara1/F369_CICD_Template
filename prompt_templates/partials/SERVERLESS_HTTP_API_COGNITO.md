@@ -1,6 +1,7 @@
 # SOP — API Gateway HTTP API + Cognito (JWT authorizer · Lambda integration · CORS · throttling · custom domain)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active (CANONICAL for HTTP API + JWT-authorizer-by-default pattern)
+**R4 update (2026-06-16):** Added inline doc comment explaining the `default_authorizer=jwt_authorizer` pattern as canonical (every route auth-by-default; opt-out per-route with HttpNoneAuthorizer). This is the structural fix for AFIE Sprint 8 F-INT-01 — the REST-API variant in LAYER_API §4 needed the analogous `default_method_options` fix in the same R4 wave. AWS doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · API Gateway v2 (HTTP API) · Cognito User Pool + Identity Pool · JWT authorizer · Lambda proxy integration · CORS · Custom domain via Route 53 + ACM · WAF v2 · throttling
 
 ---
@@ -203,6 +204,11 @@ class ApiStack(Stack):
         )
 
         # ── 5. HTTP API ──────────────────────────────────────────────
+        # CANONICAL pattern: set `default_authorizer` at the HttpApi level so EVERY route
+        # gets the JWT check unless it explicitly opts out (see /healthz below using
+        # HttpNoneAuthorizer). Without this, routes added later default to NO auth —
+        # this was AFIE-CPG Sprint 8 F-INT-01 in the REST-API variant (LAYER_API §4).
+        # AWS doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html
         self.api = apigwv2.HttpApi(self, "HttpApi",
             api_name=f"{env_name}-app-api",
             cors_preflight=apigwv2.CorsPreflightOptions(
