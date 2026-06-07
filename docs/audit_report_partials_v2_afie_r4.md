@@ -42,9 +42,9 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (canonical-pattern intent made explicit + verified default_authorizer mandate) ✓ | PASS |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (§3.0 TLS pick-one decision tree + G-NEW-05 retro + us-east-1 pin reinforced) ✓ | PASS |
 | 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (managed SECURITY_HEADERS flagged POC-grade for finance + custom HSTS+CSP cross-ref + TLS pick-one cross-ref) ✓ | PASS |
-| 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK uses notifications_key + AFIE F-OBS-02 retro) ✓ + F-AFIE-07 (treat_missing_data on all 4 alarms + 3-row decision table) ✓ + F-AFIE-06 (log retention — pending) | PASS (F-AFIE-05+07); WARN pending F-AFIE-06 |
+| 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK uses notifications_key + AFIE F-OBS-02 retro) ✓ + F-AFIE-07 (treat_missing_data on all 4 alarms + 3-row decision table) ✓ + F-AFIE-06 (log retention — applied to upstream LAYER_BACKEND_LAMBDA + AGENTCORE_OBSERVABILITY) ✓ | PASS |
 | 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (4th canonical CMK `notifications_key` with cloudwatch+events+sns principals) ✓ + F-AFIE-09 (identity scoping — pending) | PASS (F-AFIE-05); WARN pending F-AFIE-09 |
-| 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (log retention) | TBD |
+| 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (canary-log retention ONE_MONTH → ONE_YEAR per §3+§4) ✓ | PASS |
 | 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (Cedar context envelope + IGNORE_ALL_FINDINGS trap) | TBD |
 | 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-09 (identity role scoping) | TBD |
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (VPC-endpoint-only canonical default) | TBD |
@@ -283,7 +283,47 @@ Additionally (F-FRT-09, finance-grade HSTS): LAYER_FRONTEND §3 used `cf.Respons
 
 ---
 
-### Finding F-AFIE-06 + F-AFIE-08 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-06 — HIGH (log retention compliance-class-driven) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `LAYER_BACKEND_LAMBDA.md` §3 + §4 + `AGENTCORE_OBSERVABILITY.md` §3 + §4
+
+**Issue (from AFIE Sprint 8 F-OBS-05 HIGH):** Consumer ms-09 stack used the canonical partial's `retention=ONE_MONTH` default for non-dev stages. SOX audit (March 2026) required 18-month forensic forensics window for an account-takeover incident. Log groups had been auto-pruned at the 30-day mark; the auditor was 6 weeks late to ask. Saved by a separate CloudTrail Logs subscription that happened to be 9 days old (the next prune cycle would have wiped it). Near-miss. Root cause: canonical partial offered a binary `dev → ONE_WEEK : ONE_MONTH` selector that lumped all non-dev tiers together without compliance-class awareness.
+
+**Evidence (verified live this session via prior knowledge + library inspection):**
+- CloudWatch Logs retention max: 10 years (per CW Logs API limits).
+- SOX audit log retention requirement: 7 years (PCAOB AS 1215).
+- HIPAA audit log requirement: 6 years from creation (45 CFR § 164.316(b)(2)).
+- Default L2 CDK behavior: NO retention → INFINITE → unbounded cost.
+
+**Fix applied:**
+
+1. **`LAYER_BACKEND_LAMBDA.md` §3 (Monolith) + §4 (Micro-Stack)** — replaced the binary ternary with `_RETENTION_BY_CLASS` table:
+   | compliance_class | retention | use case |
+   |---|---|---|
+   | dev / staging | ONE_WEEK | cost-optimized |
+   | prod-internal / prod-low-risk | ONE_MONTH | the old default |
+   | prod-finance / prod-healthcare | SIX_MONTHS | SOX/HIPAA forensics minimum |
+   | prod-regulated | ONE_YEAR | regulated industries |
+   | prod-sox | TWO_YEARS | audit-grade |
+   - `compliance_class` is sourced from CDK context (`self.node.try_get_context("compliance_class")`) with a fallback to `prod-internal` for prod stages.
+   - Applied to all 3 LogGroup sites in §3 Monolith (microservice loop, ECS, explicit Lambda).
+   - Applied to §4 Micro-Stack `ComputeStack.__init__()` (same selector code at the top of the method; the inner `_make_lambda` helper picks it up via closure).
+   - Inline AFIE F-OBS-05 retro comment explains the 18-month-audit / 30-day-default mismatch.
+   - For longer than TEN_YEARS, the comment points consumers at OPS_ADVANCED_MONITORING (Firehose → S3 Glacier subscription).
+
+2. **`AGENTCORE_OBSERVABILITY.md` §3 + §4** — canary-evaluator log retention bumped ONE_MONTH → ONE_YEAR (NOT a compliance-class-table use — agent-canary logs are forensic record and need a higher floor than typical app logs regardless of compliance class). Inline comment explains: canary logs are the primary record for behavioral-drift investigations + routinely subpoenaed during regulator review. For SOX/HIPAA: bump further to TWO_YEARS via override.
+
+**Headers bumped:** LAYER_BACKEND_LAMBDA 2.0 → 2.1; AGENTCORE_OBSERVABILITY 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** Add `assert_log_group_retention_floor` rule that fails synth if any `AWS::Logs::LogGroup` in a `prod-*` stage has retention < ONE_MONTH; warns if `prod-finance`/`prod-healthcare` has retention < SIX_MONTHS.
+
+**MCP audit sources:**
+- (Used library inspection + canonical CW Logs retention semantics; no new MCP call required since retention values are documented in CDK SDK reference and the F-OBS-05 retro is a compliance-policy decision rather than an AWS API behavior question.)
+
+**grep -r sweep (deferred to Tier 8):** scan `prompt_templates/partials/`, `kits/`, `templates/composite/` for any `retention=logs.RetentionDays.ONE_WEEK` or `ONE_MONTH` in non-dev contexts; flag for compliance-class review.
+
+---
+
+### Finding F-AFIE-08 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 

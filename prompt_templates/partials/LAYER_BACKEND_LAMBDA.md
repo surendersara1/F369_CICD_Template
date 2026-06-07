@@ -1,6 +1,7 @@
 # SOP — Backend Compute Layer (Lambda + Fargate)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** (F-AFIE-06) Replaced binary `dev → ONE_WEEK : ONE_MONTH` retention selector with `_RETENTION_BY_CLASS` table driven by `compliance_class` CDK context (8 classes: dev/staging/prod-internal/prod-low-risk/prod-finance/prod-healthcare/prod-regulated/prod-sox; SIX_MONTHS minimum for finance/healthcare, ONE_YEAR for regulated, TWO_YEARS for SOX). Applied to §3 Monolith + §4 Micro-Stack. Inline AFIE F-OBS-05 retro comment (SOX audit found 30-day default insufficient → 18-month forensics window required → backfill from CloudTrail subscription that was 9 days old → near-miss).
 **Applies to:** AWS CDK v2 (Python 3.12+) · Lambda Python 3.12+ · Fargate arm64
 
 ---
@@ -113,14 +114,37 @@ def _create_backend(self, stage_name: str) -> None:
 
     self.lambda_functions: Dict[str, _lambda.Function] = {}
 
+    # F-AFIE-06: log retention class is a compliance choice, not a dev convenience.
+    # AFIE Sprint 8 F-OBS-05: ms-09 default of ONE_MONTH was discovered during SOX
+    # audit to be insufficient — auditor required 18-month root-cause forensics
+    # window. Decision table (compliance_class is set via stack context or env tag):
+    #   "dev" / "staging"                  → ONE_WEEK         (cost-optimized)
+    #   "prod-internal" / "prod-low-risk"  → ONE_MONTH        (the old default)
+    #   "prod-finance" / "prod-healthcare" → SIX_MONTHS minimum (SOX/HIPAA forensics)
+    #   "prod-regulated" / "prod-sox"      → ONE_YEAR or TWO_YEARS (audit-grade)
+    # Capped at TEN_YEARS by CloudWatch Logs. For longer, subscribe to Firehose →
+    # S3 Glacier (see OPS_ADVANCED_MONITORING) and retain only the recent slice in
+    # CW Logs to keep ingest cost down.
+    _RETENTION_BY_CLASS = {
+        "dev":              logs.RetentionDays.ONE_WEEK,
+        "staging":          logs.RetentionDays.ONE_WEEK,
+        "prod-internal":    logs.RetentionDays.ONE_MONTH,
+        "prod-low-risk":    logs.RetentionDays.ONE_MONTH,
+        "prod-finance":     logs.RetentionDays.SIX_MONTHS,
+        "prod-healthcare":  logs.RetentionDays.SIX_MONTHS,
+        "prod-regulated":   logs.RetentionDays.ONE_YEAR,
+        "prod-sox":         logs.RetentionDays.TWO_YEARS,
+    }
+    compliance_class = self.node.try_get_context("compliance_class") or (
+        "dev" if stage_name == "dev" else "prod-internal"
+    )
+    retention_days = _RETENTION_BY_CLASS.get(compliance_class, logs.RetentionDays.ONE_MONTH)
+
     for svc in MICROSERVICES:
         log_group = logs.LogGroup(
             self, f"{svc['id']}LogGroup",
             log_group_name=f"/aws/lambda/{{project_name}}-{svc['name']}-{stage_name}",
-            retention=(
-                logs.RetentionDays.ONE_WEEK if stage_name == "dev"
-                else logs.RetentionDays.ONE_MONTH
-            ),
+            retention=retention_days,
             encryption_key=self.kms_key,
             removal_policy=RemovalPolicy.DESTROY,
         )
@@ -239,7 +263,7 @@ def _create_backend(self, stage_name: str) -> None:
     ecs_log_group = logs.LogGroup(
         self, "ECSLogGroup",
         log_group_name=f"/ecs/{{project_name}}-worker-{stage_name}",
-        retention=logs.RetentionDays.ONE_MONTH,
+        retention=retention_days,    # F-AFIE-06: compliance-class-driven, see top of method
         encryption_key=self.kms_key,
         removal_policy=RemovalPolicy.DESTROY,
     )
@@ -392,6 +416,22 @@ class ComputeStack(cdk.Stack):
 
         runtime = _lambda.Runtime.PYTHON_3_12
 
+        # F-AFIE-06: compliance-class-driven log retention. See §3 Monolith comment
+        # block for the full decision table; this is the same selector applied here
+        # so cross-stack consumers get consistent retention semantics.
+        _RETENTION_BY_CLASS = {
+            "dev":              logs.RetentionDays.ONE_WEEK,
+            "staging":          logs.RetentionDays.ONE_WEEK,
+            "prod-internal":    logs.RetentionDays.ONE_MONTH,
+            "prod-low-risk":    logs.RetentionDays.ONE_MONTH,
+            "prod-finance":     logs.RetentionDays.SIX_MONTHS,
+            "prod-healthcare":  logs.RetentionDays.SIX_MONTHS,
+            "prod-regulated":   logs.RetentionDays.ONE_YEAR,
+            "prod-sox":         logs.RetentionDays.TWO_YEARS,
+        }
+        compliance_class = self.node.try_get_context("compliance_class") or "prod-internal"
+        retention_days = _RETENTION_BY_CLASS.get(compliance_class, logs.RetentionDays.ONE_MONTH)
+
         vpc_config = {
             "vpc": vpc,
             "security_groups": [lambda_sg],
@@ -422,11 +462,12 @@ class ComputeStack(cdk.Stack):
             extra_env: dict | None = None,
         ) -> _lambda.Function:
             """Explicit LogGroup avoids the deprecated log_retention= prop which
-            spawns an extra CDK-managed custom-resource Lambda per function."""
+            spawns an extra CDK-managed custom-resource Lambda per function.
+            F-AFIE-06: retention is compliance-class-driven — see top of method."""
             log_group = logs.LogGroup(
                 self, f"{logical_id}Logs",
                 log_group_name=f"/aws/lambda/{{project_name}}-{logical_id.lower()}",
-                retention=logs.RetentionDays.ONE_MONTH,
+                retention=retention_days,    # F-AFIE-06 (see _RETENTION_BY_CLASS)
                 removal_policy=cdk.RemovalPolicy.DESTROY,
             )
             fn = _lambda.Function(
