@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore Identity (IAM SigV4, Cognito, Per-Agent Roles)
 
-**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, on top of v2.1 F-AFIE-01 from 2026-06-16):** §3 `_create_agent_role` signature redesigned — `needs_gateway: bool` / `needs_sub_agents: bool` / `needs_memory: bool` replaced with `gateway_arns: list[str] | None` / `sub_agent_runtime_arns: list[str] | None` / `memory_arns: list[str] | None` + opt-in `permit_wildcard: bool = False`. AFIE Sprint 10 F-GOV-09: prod orchestrator with `gateway/*` invoked teammate's dev-gateway; no incident but POLP violation auditor flagged HIGH. §4 micro-stack `build_agent_role` was already correct (specific ARNs via SSM). §3.4 gotcha codifies the new pattern + forward-ref to F-AFIE-22 synth-guard `assert_no_wildcard_agentcore_grants_in_prod`.
 **R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` alongside `foundation-model/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · `aws_iam` · `aws_cognito` · SigV4 / `botocore.auth` · `httpx` ≥ 0.27 · MCP streamable HTTP transport
 
@@ -42,12 +43,25 @@ from aws_cdk import Aws, aws_iam as iam
 def _create_agent_role(
     self,
     agent_name: str,
-    needs_gateway: bool         = True,
-    needs_sub_agents: bool      = False,
-    needs_memory: bool          = False,
+    # F-AFIE-09: required specific ARNs replace the old needs_* booleans + /* wildcards.
+    # AFIE Sprint 10 F-GOV-09: ms-09's OrchestratorAgentRole was granted
+    # InvokeAgentRuntime on runtime/* and InvokeGateway on gateway/*. A teammate's
+    # prototype dev-gateway in the same account was invoked by prod orchestrator,
+    # returned ALLOW for a tool that prod-gateway's Cedar policy would have denied.
+    # No incident, but principle-of-least-privilege violation that auditor flagged HIGH.
+    gateway_arns: list[str] | None     = None,    # ["arn:aws:...:gateway/abc"]
+    sub_agent_runtime_arns: list[str] | None = None,
+    memory_arns: list[str] | None      = None,
+    permit_wildcard: bool              = False,   # opt-in for dev/exploratory only
     extra_statements: list[iam.PolicyStatement] | None = None,
 ) -> iam.Role:
-    """Per-agent least-privilege execution role."""
+    """Per-agent least-privilege execution role.
+
+    F-AFIE-09: each AgentCore action grant scopes to specific resource ARN(s) by
+    default. Pass `permit_wildcard=True` ONLY in dev/exploratory contexts; for
+    prod, supply the actual ARN(s). The synth-guard (F-AFIE-22) will fail the
+    build if `permit_wildcard=True` is set in a prod-* compliance_class.
+    """
     role = iam.Role(
         self, f"{agent_name}-ExecRole",
         role_name=f"{{project_name}}-{agent_name}-role",
@@ -74,24 +88,35 @@ def _create_agent_role(
         resources=[f"arn:aws:ssm:{Aws.REGION}:{Aws.ACCOUNT_ID}:parameter/{{project_name}}/*"],
     ))
 
-    if needs_gateway:
+    def _resolve_resources(arns: list[str] | None, kind: str) -> list[str]:
+        if arns:
+            return arns
+        if permit_wildcard:
+            return [f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:{kind}/*"]
+        # Neither specific ARNs nor wildcard opt-in → caller didn't intend this grant.
+        # Return [] which signals "skip adding the statement entirely".
+        return []
+
+    gw_res = _resolve_resources(gateway_arns, "gateway")
+    if gw_res:
         role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock-agentcore:InvokeGateway"],
-            # Scope to your gateway ARN when known; "*" is a stop-gap
-            resources=[f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:gateway/*"],
+            resources=gw_res,
         ))
-    if needs_sub_agents:
+    rt_res = _resolve_resources(sub_agent_runtime_arns, "runtime")
+    if rt_res:
         role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock-agentcore:InvokeAgentRuntime"],
-            resources=[f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:runtime/*"],
+            resources=rt_res,
         ))
-    if needs_memory:
+    mem_res = _resolve_resources(memory_arns, "memory")
+    if mem_res:
         role.add_to_policy(iam.PolicyStatement(
             actions=[
                 "bedrock-agentcore:RetrieveMemoryRecords",
                 "bedrock-agentcore:CreateEvent",
             ],
-            resources=[f"arn:aws:bedrock-agentcore:{Aws.REGION}:{Aws.ACCOUNT_ID}:memory/*"],
+            resources=mem_res,
         ))
     for s in (extra_statements or []):
         role.add_to_policy(s)
@@ -178,6 +203,7 @@ def _create_user_pool(self) -> cognito.UserPool:
 ### 3.4 Monolith gotchas
 
 - **`resources=["*"]` is a smell.** Always scope to a known prefix (`runtime/*`, `gateway/*`, `memory/*`). `"*"` in prod IAM fails Security Hub controls SH.IAM.* and CIS controls.
+- **R4 / F-AFIE-09: `/*` on gateway/runtime/memory ARNs is now opt-in only.** `_create_agent_role` signature replaced `needs_gateway: bool` with `gateway_arns: list[str] | None`. Pass specific ARN(s) by default; set `permit_wildcard=True` ONLY in dev/exploratory contexts. AFIE Sprint 10 F-GOV-09 retro: ms-09 prod orchestrator role with `gateway/*` invoked a teammate's prototype dev-gateway in the same account, returned ALLOW for a tool that prod-gateway Cedar would have denied. No incident — but auditor flagged HIGH. Synth-guard F-AFIE-22 `assert_no_wildcard_agentcore_grants_in_prod` will fail the build if `permit_wildcard=True` in `prod-*` compliance_class.
 - **`CompositePrincipal`** adds one `sts:AssumeRole` statement per principal. If you never plan to run the container on Fargate, drop `ecs-tasks.amazonaws.com` — keeps the role auditable.
 - **`sms=False` on MFA** is intentional — SMS-OTP is SIM-swap-vulnerable; TOTP only.
 - **`advanced_security_mode=ENFORCED`** enables adaptive auth + compromised-credentials detection. It is priced per MAU — check cost vs. required SOC2 / HIPAA controls.

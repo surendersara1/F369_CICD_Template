@@ -1,7 +1,9 @@
 # SOP — Security Layer (KMS, IAM Baseline, Permission Boundaries)
 
-**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
-**R4 update (2026-06-17):** Added 4th canonical CMK class `self.notifications_key` (SNS ops topic encryption + CW alarm action compatibility) in both §3 Monolith and §4 Micro-Stack. Three service principals required on the key policy: `cloudwatch.amazonaws.com` (CW alarms encrypting via SNS), `events.amazonaws.com` (EventBridge → SNS), `sns.amazonaws.com` (envelope decrypt). AFIE F-OBS-02 retro: missing this grant → CW alarms fire, GenerateDataKey* denied, SNS publish fails silently, zero pages. AWS doc: https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services.
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 updates (2026-06-17):**
+- (F-AFIE-05) Added 4th canonical CMK class `self.notifications_key` (SNS ops topic encryption + CW alarm action compatibility) in both §3 Monolith and §4 Micro-Stack. Three service principals required on the key policy: `cloudwatch.amazonaws.com` (CW alarms encrypting via SNS), `events.amazonaws.com` (EventBridge → SNS), `sns.amazonaws.com` (envelope decrypt). AFIE F-OBS-02 retro. AWS doc: https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services.
+- (F-AFIE-09) Added `DenyAgentCoreInvokeAcrossProjects` statement to the permission boundary in both §3 + §4 — defense-in-depth catches cross-project AgentCore `Invoke*` calls when the target resource lacks `aws:ResourceTag/Project = {project_name}`. The role-level wildcard is the upstream bug (fixed in AGENTCORE_IDENTITY F-AFIE-09); this boundary statement is the blast-radius cap. AFIE F-GOV-09 retro: prod orchestrator with `gateway/*` invoked teammate's dev-gateway in the same account.
 **Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
@@ -100,6 +102,25 @@ def _create_security(self, stage: str) -> None:
                 ],
                 resources=["*"],
             ),
+            # F-AFIE-09: cross-namespace blast radius cap. AFIE Sprint 10 F-GOV-09:
+            # if any consumer ships a per-agent role with InvokeGateway on `gateway/*`,
+            # this DENY catches any cross-project bedrock-agentcore call where the
+            # target resource doesn't carry the project tag. The role-level wildcard
+            # is the upstream bug; this boundary statement is the defense-in-depth.
+            iam.PolicyStatement(
+                sid="DenyAgentCoreInvokeAcrossProjects",
+                effect=iam.Effect.DENY,
+                actions=[
+                    "bedrock-agentcore:InvokeGateway",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:RetrieveMemoryRecords",
+                    "bedrock-agentcore:CreateEvent",
+                ],
+                resources=["*"],
+                conditions={
+                    "StringNotEquals": {"aws:ResourceTag/Project": "{project_name}"}
+                },
+            ),
         ],
     )
 
@@ -194,6 +215,18 @@ class SecurityStack(cdk.Stack):
                     sid="DenyIamAdmin", effect=iam.Effect.DENY,
                     actions=["iam:CreateUser", "iam:CreateAccessKey", "iam:PutUserPolicy"],
                     resources=["*"],
+                ),
+                # F-AFIE-09: cross-project AgentCore DENY — see §3 for the AFIE retro.
+                iam.PolicyStatement(
+                    sid="DenyAgentCoreInvokeAcrossProjects", effect=iam.Effect.DENY,
+                    actions=[
+                        "bedrock-agentcore:InvokeGateway",
+                        "bedrock-agentcore:InvokeAgentRuntime",
+                        "bedrock-agentcore:RetrieveMemoryRecords",
+                        "bedrock-agentcore:CreateEvent",
+                    ],
+                    resources=["*"],
+                    conditions={"StringNotEquals": {"aws:ResourceTag/Project": "{project_name}"}},
                 ),
             ],
         )

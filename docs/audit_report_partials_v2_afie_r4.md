@@ -43,10 +43,10 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (§3.0 TLS pick-one decision tree + G-NEW-05 retro + us-east-1 pin reinforced) ✓ | PASS |
 | 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (managed SECURITY_HEADERS flagged POC-grade for finance + custom HSTS+CSP cross-ref + TLS pick-one cross-ref) ✓ | PASS |
 | 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK uses notifications_key + AFIE F-OBS-02 retro) ✓ + F-AFIE-07 (treat_missing_data on all 4 alarms + 3-row decision table) ✓ + F-AFIE-06 (log retention — applied to upstream LAYER_BACKEND_LAMBDA + AGENTCORE_OBSERVABILITY) ✓ | PASS |
-| 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (4th canonical CMK `notifications_key` with cloudwatch+events+sns principals) ✓ + F-AFIE-09 (identity scoping — pending) | PASS (F-AFIE-05); WARN pending F-AFIE-09 |
+| 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (4th canonical CMK `notifications_key` with cloudwatch+events+sns principals) ✓ + F-AFIE-09 (DenyAgentCoreInvokeAcrossProjects boundary statement, §3+§4) ✓ | PASS |
 | 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (canary-log retention ONE_MONTH → ONE_YEAR per §3+§4) ✓ | PASS |
 | 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (validation_mode default flipped to VALIDATE + §3.2a canonical Cedar context envelope + DEFAULT_POLICY fail-closed deny-all + RbacLoadError raises instead of silent fallback) ✓ | PASS |
-| 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-09 (identity role scoping) | TBD |
+| 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-01 (3-ARN Bedrock InvokeModel; landed 2026-06-16 as v2.1) + F-AFIE-09 (§3 `_create_agent_role` signature redesigned: needs_* booleans → required `*_arns: list[str]` + opt-in `permit_wildcard`) ✓ | PASS |
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (VPC-endpoint-only canonical default) | TBD |
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (detective controls live-deploy step) | TBD |
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (partial scoping for InvokeAgentRuntime/Gateway) | TBD |
@@ -372,7 +372,48 @@ The canonical RBAC loader returned `DEFAULT_POLICY = {tool_access: {mode: 'allow
 
 ---
 
-### Finding F-AFIE-09 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-09 — HIGH (per-agent role scoping + cross-project DENY) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `AGENTCORE_IDENTITY.md` §3.1 + `LAYER_SECURITY.md` §3 + §4
+
+**Issue (from AFIE Sprint 10 F-GOV-09 HIGH):** ms-09 `OrchestratorAgentRole` was granted `bedrock-agentcore:InvokeAgentRuntime` on `runtime/*` and `bedrock-agentcore:InvokeGateway` on `gateway/*`. A teammate's prototype dev-gateway in the same account was invoked by the prod orchestrator during a session, returned ALLOW for a tool that prod-gateway's Cedar policy would have denied. No incident, but auditor flagged HIGH as principle-of-least-privilege violation.
+
+Canonical partial §3.1 used `needs_gateway: bool` / `needs_sub_agents: bool` / `needs_memory: bool` flags with `/*` resource wildcards, making the wildcard the path of least resistance. The §4 Micro-Stack `build_agent_role` was already correct (required specific ARNs via SSM) — but consumers using §3 had no signal that wildcards were prod-unsafe.
+
+**Evidence (verified live this session via library inspection):**
+- `AGENTCORE_IDENTITY.md` §3.1 lines 81, 86, 94 — confirmed `gateway/*` / `runtime/*` / `memory/*` wildcards.
+- `AGENTCORE_IDENTITY.md` §4.3 lines 316-338 — confirmed Micro-Stack already required specific SSM-sourced ARNs.
+- `LAYER_SECURITY.md` §3 lines 78-104 — permission boundary had `DenyIamAdmin` but no cross-namespace AgentCore DENY.
+
+**Fix applied:**
+
+1. **`AGENTCORE_IDENTITY.md` §3.1 `_create_agent_role` signature redesign:**
+   - Removed: `needs_gateway: bool = True`, `needs_sub_agents: bool = False`, `needs_memory: bool = False`
+   - Added: `gateway_arns: list[str] | None = None`, `sub_agent_runtime_arns: list[str] | None = None`, `memory_arns: list[str] | None = None`
+   - Added opt-in: `permit_wildcard: bool = False` (only sets `/*` when explicitly opted in)
+   - Inner `_resolve_resources(arns, kind)` helper returns specific ARNs when given, falls back to `/*` only when `permit_wildcard=True`, returns `[]` (no statement added) when neither — preventing accidental wildcard grants.
+   - Docstring + inline AFIE F-GOV-09 retro + forward-ref to F-AFIE-22 synth-guard rule `assert_no_wildcard_agentcore_grants_in_prod`.
+
+2. **`AGENTCORE_IDENTITY.md` §3.4 gotchas** — new bullet codifying the AFIE F-GOV-09 retro + the new API contract.
+
+3. **`LAYER_SECURITY.md` §3 + §4 permission boundary** — added `DenyAgentCoreInvokeAcrossProjects` statement:
+   - Deny actions: `InvokeGateway`, `InvokeAgentRuntime`, `RetrieveMemoryRecords`, `CreateEvent`
+   - Resources: `"*"` (anything)
+   - Condition: `StringNotEquals { aws:ResourceTag/Project: "{project_name}" }` — fires only when the target resource doesn't carry the project tag.
+   - This is defense-in-depth: even if a downstream consumer ships a role with `gateway/*`, the boundary catches the cross-project call.
+
+**Headers bumped:** AGENTCORE_IDENTITY 2.1 → 2.2; LAYER_SECURITY 2.1 → 2.2 (both got prior R4 bumps in earlier findings — these are increments within the same wave).
+
+**Recommended next steps (deferred to F-AFIE-22):**
+- `assert_no_wildcard_agentcore_grants_in_prod` — fails synth if `compliance_class.startswith("prod-")` and any `IAM::Policy` has `gateway/*` / `runtime/*` / `memory/*` in `Resource`.
+- `assert_permission_boundary_includes_agentcore_cross_project_deny` — fails synth if the boundary ManagedPolicy doesn't carry the `DenyAgentCoreInvokeAcrossProjects` SID.
+
+**MCP audit sources:** Used library inspection + AWS IAM POLP guidance (Security Hub control SH.IAM.*). Cross-project tag-based ABAC is canonical AWS pattern documented in https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html.
+
+**grep -r sweep (deferred to Tier 8):** scan for any IAM `PolicyStatement` granting `bedrock-agentcore:Invoke*` to `*/*` without an `aws:ResourceTag/Project` condition.
+
+---
+
+### Finding F-AFIE-10 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
