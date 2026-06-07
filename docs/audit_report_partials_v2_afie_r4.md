@@ -42,8 +42,8 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (canonical-pattern intent made explicit + verified default_authorizer mandate) ✓ | PASS |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (§3.0 TLS pick-one decision tree + G-NEW-05 retro + us-east-1 pin reinforced) ✓ | PASS |
 | 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (managed SECURITY_HEADERS flagged POC-grade for finance + custom HSTS+CSP cross-ref + TLS pick-one cross-ref) ✓ | PASS |
-| 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK grant), F-AFIE-06 (log retention), F-AFIE-07 (missing-data treatment) | TBD |
-| 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (KMS cross-service grant pattern), F-AFIE-09 (identity scoping) | TBD |
+| 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK uses notifications_key + AFIE F-OBS-02 retro) ✓ + F-AFIE-07 (treat_missing_data on all 4 alarms + 3-row decision table) ✓ + F-AFIE-06 (log retention — pending) | PASS (F-AFIE-05+07); WARN pending F-AFIE-06 |
+| 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (4th canonical CMK `notifications_key` with cloudwatch+events+sns principals) ✓ + F-AFIE-09 (identity scoping — pending) | PASS (F-AFIE-05); WARN pending F-AFIE-09 |
 | 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (log retention) | TBD |
 | 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (Cedar context envelope + IGNORE_ALL_FINDINGS trap) | TBD |
 | 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-09 (identity role scoping) | TBD |
@@ -223,7 +223,67 @@ Additionally (F-FRT-09, finance-grade HSTS): LAYER_FRONTEND §3 used `cf.Respons
 
 ---
 
-### Finding F-AFIE-05 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-05 — HIGH (SNS-CMK cross-service grant) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `LAYER_SECURITY.md` §3 + §4 + `LAYER_OBSERVABILITY.md` §3 + §4
+
+**Issue (from AFIE Sprint 8 F-OBS-02 HIGH):** Consumer ms-09 stack created an SNS ops topic with `master_key=<data CMK>`. Topic was encrypted but the data CMK had no `cloudwatch.amazonaws.com` principal grant. CW alarms fired, `kms:GenerateDataKey*` was denied during SNS publish, the publish failed silently (CW logged "InternalError" only), and zero pages were delivered to PagerDuty for the duration of the incident window. Canonical partials had `master_key=self.kms_key` worded as if that were sufficient — it isn't, without the cross-service principal grant on the key policy.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html (10000 chars, start_index 0 + 5000) — confirms the canonical statement (Principal: `Service`: `cloudwatch.amazonaws.com`, Actions: `kms:GenerateDataKey*` + `kms:Decrypt`) for AWS-service event sources to publish to CMK-encrypted topics; explicit table includes CloudWatch (alarm actions), EventBridge, RDS Events, SES, etc.
+- `mcp__awslabs_aws-documentation-mcp-server__search_documentation` (key-policies + SNS encrypted-topic publish) — confirms three principals are required (cloudwatch + events + sns) for a fully-functional ops-topic CMK.
+
+**Fix applied:**
+
+1. **`LAYER_SECURITY.md` §3 + §4** — added a 4th canonical CMK class `self.notifications_key` (alias `{project_name}-notifications-{stage}`) alongside the existing `audio_data_key` / `job_metadata_key` / `logs_key`. Three service principals pre-granted via `grant_encrypt_decrypt`: `cloudwatch.amazonaws.com`, `events.amazonaws.com`, `sns.amazonaws.com`. Inline AWS doc URL + AFIE F-OBS-02 retro comment so future readers understand why all three principals are required.
+
+2. **`LAYER_OBSERVABILITY.md` §3 (Monolith)** — changed `master_key=self.kms_key` to `master_key=self.notifications_key` with inline F-OBS-02 retro comment explaining the failure mode.
+
+3. **`LAYER_OBSERVABILITY.md` §4 (Micro-Stack)** — added `notifications_key: kms.IKey` to `ObservabilityStack.__init__()` signature (passed in from `SecurityStack`); SNS topic now constructed with `master_key=notifications_key`. Inline F-AFIE-05 retro comment.
+
+4. **`LAYER_OBSERVABILITY.md` §3.1 gotchas** — added explicit "SNS topic CMK choice" gotcha consolidating the lesson.
+
+**Headers bumped:** LAYER_SECURITY 2.0 → 2.1; LAYER_OBSERVABILITY 2.0 → 2.1; both with R4 update banner pointing at the AWS doc.
+
+**Recommended next steps (deferred to F-AFIE-22, the synth-guard assertion library):** Add `assert_sns_cmk_has_required_principals` rule that fails synth if `master_key` is set on `AWS::SNS::Topic` but the keyed CMK's policy lacks `cloudwatch.amazonaws.com` + `sns.amazonaws.com` grants.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html — canonical 3-principal key policy statement for AWS-service-encrypted-topic compatibility (read 2026-06-17)
+
+**grep -r sweep (deferred to Tier 8 Hours 42-46):** scan `prompt_templates/partials/`, `kits/`, `templates/composite/` for any other `sns.Topic(... master_key=...)` site that doesn't draw from `notifications_key` or doesn't ensure the CMK has the cross-service grant.
+
+---
+
+### Finding F-AFIE-07 — HIGH (CW alarm missing-data treatment mandatory) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `LAYER_OBSERVABILITY.md` §3 + §4
+
+**Issue (from AFIE Sprint 8 F-OBS-04 HIGH):** Consumer ms-09 stack defined 11 CloudWatch alarms across the data pipeline. 7 of 11 omitted `treat_missing_data`. CloudWatch's default behavior on omission is to evaluate as `MISSING`, which transitions the alarm to INSUFFICIENT_DATA when metric data is sparse. PagerDuty integration only pages on ALARM state, not INSUFFICIENT_DATA, so during a real Aurora connection-pool exhaustion (3am UTC), the steady-state CPU alarm flapped to INSUFFICIENT_DATA and the on-call was never paged. Service was down 47 minutes. Canonical partial had `treat_missing_data=NOT_BREACHING` on ONE alarm and omitted it on the other 4, leaving consumers no semantic guidance on which value to pick.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__search_documentation` (CW alarm missing data treatment) → https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Edit-CloudWatch-Alarm.html confirms `MISSING` is the default behavior on omission and that alarm state transitions through INSUFFICIENT_DATA where downstream actions are NOT triggered.
+
+**Fix applied:**
+
+1. **`LAYER_OBSERVABILITY.md` §3 Monolith** — added `treat_missing_data=cw.TreatMissingData.NOT_BREACHING` to the DLQ depth alarm (the only one missing in §3) with inline retro comment.
+
+2. **`LAYER_OBSERVABILITY.md` §4 Micro-Stack** — added `treat_missing_data` to all 3 missing alarms:
+   - `SfnFailuresAlarm` → `NOT_BREACHING` (failure-rate metric; absent = no failures = good)
+   - `{qname}DepthAlarm` (DLQ loop) → `NOT_BREACHING` (depth metric; absent = empty = good)
+   - `RdsCpuAlarm` → `BREACHING` (steady-state metric; absent means DB is down — page on it)
+
+3. **`LAYER_OBSERVABILITY.md` §3.1 gotchas** — added the canonical 3-row decision table for picking `treat_missing_data` semantically (error/failure rates → NOT_BREACHING; steady-state metrics → BREACHING; cost/quota → NOT_BREACHING or IGNORE).
+
+**Header bumped:** LAYER_OBSERVABILITY 2.0 → 2.1 (combined with F-AFIE-05).
+
+**Recommended next steps (deferred to F-AFIE-22):** Add `assert_alarm_treat_missing_data_set` rule that fails synth if any `AWS::CloudWatch::Alarm` resource omits `TreatMissingData`.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Edit-CloudWatch-Alarm.html — alarm missing-data semantics (read 2026-06-17)
+
+**grep -r sweep (deferred to Tier 8):** scan `prompt_templates/partials/`, `kits/`, `templates/composite/` for any `cw.Alarm(...)` without an explicit `treat_missing_data` parameter.
+
+---
+
+### Finding F-AFIE-06 + F-AFIE-08 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
@@ -380,4 +440,46 @@ Populated as Tier 1-4 fixes ship.
                  WAFv2 CLOUDFRONT scope is the canonical L7 protection layer; must be
                  created in us-east-1 to attach to CloudFront distributions.
    findings backed: F-AFIE-04 (CDN_CLOUDFRONT_FOUNDATION §3.0 region pin for WAFv2)
+```
+
+---
+
+### Hour 13 — F-AFIE-05 + F-AFIE-07 MCP citations
+
+```
+[13:00] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "SNS topic KMS customer managed key publish encryption CloudWatch alarm"
+   search_intent: Find canonical KMS key policy required for CW alarms to publish to
+                  a CMK-encrypted SNS topic
+   result rank 1: https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html
+   result rank 2: https://docs.aws.amazon.com/sns/latest/dg/sns-create-topic.html
+   findings backed: F-AFIE-05 (LAYER_SECURITY notifications_key + LAYER_OBSERVABILITY topic CMK)
+
+[13:05] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "SNS encrypted KMS CloudWatch alarms publish key policy GenerateDataKey
+           Decrypt cloudwatch service principal"
+   search_intent: Find the exact KMS key policy statement allowing CW alarm SNS action
+                  to use CMK for SNS publish
+   result rank 1: https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html
+   result rank 4: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/encrypt-lookup-tables-kms.html
+   findings backed: F-AFIE-05 (confirmed kms:GenerateDataKey* + kms:Decrypt are the
+                    minimum actions; service principal is cloudwatch.amazonaws.com)
+
+[13:15] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html
+   max_length: 10000 (start_index 0 + start_index 5000 retrieved)
+   key passage (start_index 5000): "To allow the AWS service to have the
+                 kms:GenerateDataKey* and kms:Decrypt permissions, add the
+                 following statement to the KMS policy [Principal: Service:
+                 service.amazonaws.com]" + canonical event-source table mapping
+                 (Amazon CloudWatch → cloudwatch.amazonaws.com, Amazon CloudWatch
+                 Events → events.amazonaws.com, Amazon SNS → sns.amazonaws.com).
+   findings backed: F-AFIE-05 (canonical 3-principal key policy for notifications_key)
+
+[13:30] mcp__awslabs_aws-documentation-mcp-server__search_documentation (Hour 13.5)
+   query: (referenced from prior Hour 8 + this hour) CW alarm missing-data treatment
+   search_intent: Confirm CloudWatch alarm default state when treat_missing_data omitted
+                  (MISSING → INSUFFICIENT_DATA, no SNS action fires)
+   result rank 5: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Edit-CloudWatch-Alarm.html
+   findings backed: F-AFIE-07 (mandatory treat_missing_data + semantic decision table)
 ```

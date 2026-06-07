@@ -1,6 +1,7 @@
 # SOP — Security Layer (KMS, IAM Baseline, Permission Boundaries)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** Added 4th canonical CMK class `self.notifications_key` (SNS ops topic encryption + CW alarm action compatibility) in both §3 Monolith and §4 Micro-Stack. Three service principals required on the key policy: `cloudwatch.amazonaws.com` (CW alarms encrypting via SNS), `events.amazonaws.com` (EventBridge → SNS), `sns.amazonaws.com` (envelope decrypt). AFIE F-OBS-02 retro: missing this grant → CW alarms fire, GenerateDataKey* denied, SNS publish fails silently, zero pages. AWS doc: https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services.
 **Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
@@ -57,6 +58,22 @@ def _create_security(self, stage: str) -> None:
     )
     # CloudWatch Logs needs a service principal on the key policy
     self.logs_key.grant_encrypt_decrypt(iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com"))
+
+    # Notifications / monitoring CMK — used by SNS ops topic that receives CW alarm actions.
+    # AFIE Sprint 8 F-OBS-02: CMK-encrypted SNS topic without these service principals on the
+    # key policy → CW alarms fire, kms:GenerateDataKey* DENIED, SNS publish fails silently,
+    # zero pages delivered. Both principals required. AWS doc:
+    # https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services
+    self.notifications_key = kms.Key(
+        self, "NotificationsKey",
+        alias=f"alias/{{project_name}}-notifications-{stage}",
+        enable_key_rotation=True,
+        description="SNS ops topic encryption — CW alarm actions + SES + EventBridge",
+    )
+    for svc in ("cloudwatch.amazonaws.com",     # CW alarm actions encrypting messages
+                "events.amazonaws.com",         # EventBridge rule → SNS targets
+                "sns.amazonaws.com"):           # SNS itself (envelope decrypt for subscribers)
+        self.notifications_key.grant_encrypt_decrypt(iam.ServicePrincipal(svc))
 
     # Permission boundary — every workload role must attach this
     self.permission_boundary = iam.ManagedPolicy(
@@ -149,6 +166,18 @@ class SecurityStack(cdk.Stack):
         self.logs_key.grant_encrypt_decrypt(
             iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")
         )
+
+        # Notifications CMK — used by SNS ops topic that receives CW alarm actions.
+        # See §3 monolith for the AFIE F-OBS-02 retro on why CW + EventBridge + SNS principals
+        # are all three required. AWS doc:
+        # https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services
+        self.notifications_key = kms.Key(
+            self, "NotificationsKey",
+            alias="alias/{project_name}-notifications",
+            enable_key_rotation=True,
+        )
+        for svc in ("cloudwatch.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com"):
+            self.notifications_key.grant_encrypt_decrypt(iam.ServicePrincipal(svc))
 
         # Permission boundary. Non-empty (CDK validates).
         self.permission_boundary = iam.ManagedPolicy(
