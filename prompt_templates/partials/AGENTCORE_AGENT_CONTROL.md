@@ -1,6 +1,10 @@
 # SOP — Bedrock AgentCore Agent Control (Cedar, Guardrails, RBAC, HITL)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** Three governance-grade fixes from AFIE Sprint 8 retro:
+- **§3.2 + §4 CfnPolicy `validation_mode`** flipped IGNORE_ALL_FINDINGS → VALIDATE as default (AFIE F-GOV-03: typo'd rule no-op'd for 3 weeks in prod).
+- **§3.2a NEW** canonical Cedar context envelope spec (persona/amount/risk_tier/...) — without it, `forbid ... when { context.amount > 1M }` silently no-ops (AFIE F-GOV-02: $4.7M auto-approval slipped through).
+- **§3.5 DEFAULT_POLICY** flipped allow-all → deny-all (mask_fields=['*'], sql_filter="1=0", agent_access all False); `load_rbac_policy` now RAISES `RbacLoadError` on DDB failure instead of returning the silent fallback, emits Powertools `RbacLoadFailure` metric (AFIE F-GOV-04 CRITICAL: DDB throttle → arbitrary tool access).
 **Applies to:** AWS CDK v2 (Python 3.12+) · L1 `aws_bedrockagentcore.CfnPolicyEngine` / `CfnPolicy` · `AWS::Bedrock::Guardrail` (via `CfnResource`) · Step Functions · DynamoDB · `custom_resources.AwsCustomResource`
 
 ---
@@ -121,7 +125,14 @@ def _create_policy_engine(self, cmk: kms.IKey, gateway_identifier: str) -> agent
             name=f"{{project_name}}_rule_{i}",
             policy_engine_id=engine.attr_policy_engine_id,
             definition={"cedar": {"statement": stmt}},
-            validation_mode="IGNORE_ALL_FINDINGS",
+            # F-AFIE-08: DEFAULT IS VALIDATE. AFIE Sprint 8 F-GOV-03 found that
+            # prod stacks shipped with IGNORE_ALL_FINDINGS because the gotcha was
+            # easy to miss — every CfnPolicy was permit/forbid-valid at synth time
+            # but a typo in `principal == "user::*"` (wrong syntax) wasn't caught,
+            # the rule no-op'd, and agents bypassed governance for 3 weeks before
+            # detection. NEVER ship IGNORE_ALL_FINDINGS to prod. For dev iteration
+            # speed, set validation_mode="IGNORE_ALL_FINDINGS" ONLY via stage gate.
+            validation_mode="VALIDATE",
         )
 
     # Associate the engine with the Gateway via UpdateGateway control API
@@ -150,6 +161,43 @@ def _create_policy_engine(self, cmk: kms.IKey, gateway_identifier: str) -> agent
     )
     return engine
 ```
+
+### 3.2a Canonical Cedar context envelope (F-AFIE-08)
+
+Cedar rules like `forbid(principal, action, resource) when { context.amount > 1_000_000 }` only enforce if the *evaluation context* actually carries `amount`. The agent runtime passes a `context` map at every authorization lookup. Consumers MUST send the canonical envelope below or rules silently no-op (Cedar treats missing attributes as `undefined` → `false` → permit when used in `forbid ... when { ... }`).
+
+```python
+# agent_runtime/cedar_context.py — passed to the AgentCore Gateway authorize call
+CANONICAL_CEDAR_CONTEXT = {
+    # WHO
+    "persona":          "supervisor | observer | reasoner | system",
+    "user_id":          "<from Cognito sub>",
+    "session_id":       "<unique per agent conversation>",
+    "tenant_id":        "<for multi-tenant agents>",
+
+    # WHAT
+    "action_category":  "read | write | invoke | approve | finalize",
+    "tool_name":        "<from tool registry>",
+    "resource_arn":     "<the resource being acted on>",
+
+    # HOW MUCH (amount-tiered rules — AFIE F-GOV-02 root cause)
+    "amount":           0,         # in base currency units; 0 if non-financial
+    "currency":         "USD",
+    "risk_tier":        "low | medium | high | critical",
+
+    # WHEN
+    "request_ts":       "<ISO 8601>",
+    "session_age_secs": 0,         # for time-of-day or session-age rules
+
+    # WHERE
+    "source_ip":        "<client IP at API GW>",
+    "channel":          "portal | api | slack | sdk",
+}
+```
+
+**AFIE Sprint 8 F-GOV-02 retro:** ms-09 forwarded only `{ persona, user_id, action }` to Cedar. The rule `forbid(...) when { context.amount > 1_000_000 }` silently never fired because `context.amount` was undefined. A $4.7M auto-approval went through. The fix is BOTH the canonical envelope ABOVE *and* the synth-guard rule (F-AFIE-22) `assert_cedar_rule_envelope_attrs_resolvable` that parses every cedar statement at synth time and fails the build if any rule references a context attribute not present in the canonical envelope.
+
+---
 
 ### 3.3 HITL Step Functions (amount-tiered approval)
 
@@ -210,11 +258,20 @@ logger = logging.getLogger(__name__)
 _ddb   = boto3.resource('dynamodb')
 _cache: dict[str, dict] = {}
 
+# F-AFIE-08: FAIL-CLOSED DEFAULT. AFIE Sprint 8 F-GOV-04 CRITICAL:
+# previous default was {'tool_access': {'mode': 'allow_all', 'allowed': ['*']}}
+# which meant a transient DDB throttle during load → DEFAULT_POLICY returned →
+# arbitrary tool access granted with no audit trail. The DEFAULT must DENY
+# everything; if RBAC isn't loadable, the agent doesn't run.
 DEFAULT_POLICY = {
-    'agent_access': {'supervisor': True, 'observer': True, 'reasoner': True},
-    'tool_access':  {'allowed': ['*'], 'denied': [], 'mode': 'allow_all'},
-    'data_filter':  {'mask_fields': [], 'sql_filter': ''},
+    'agent_access': {'supervisor': False, 'observer': False, 'reasoner': False},
+    'tool_access':  {'allowed': [], 'denied': ['*'], 'mode': 'deny_all'},
+    'data_filter':  {'mask_fields': ['*'], 'sql_filter': "1=0"},
 }
+
+
+class RbacLoadError(RuntimeError):
+    """Raised when RBAC policy cannot be loaded. Callers MUST treat as fail-closed."""
 
 
 def load_rbac_policy(persona: str) -> dict:
@@ -223,13 +280,26 @@ def load_rbac_policy(persona: str) -> dict:
     try:
         table = _ddb.Table(os.environ.get('RBAC_TABLE', '{project_name}-rbac-policies'))
         resp  = table.get_item(Key={'persona': persona})
-        policy = resp.get('Item', DEFAULT_POLICY)
-        _cache[persona] = policy
-        return policy
     except Exception as e:
-        logger.warning("RBAC load failed for %s: %s — using default", persona, e)
-        _cache[persona] = DEFAULT_POLICY
-        return DEFAULT_POLICY
+        # F-AFIE-08: NEVER swallow this exception with the old default — the old
+        # default was allow_all. Page on it; let the agent fail closed by raising.
+        logger.error("RBAC load failed for %s: %s — raising fail-closed", persona, e)
+        # Emit a Powertools metric (caller has lambda_powertools.metrics in scope).
+        try:
+            from aws_lambda_powertools.metrics import MetricUnit
+            from aws_lambda_powertools import Metrics
+            Metrics().add_metric(name="RbacLoadFailure", unit=MetricUnit.Count, value=1)
+        except ImportError:
+            pass
+        raise RbacLoadError(f"RBAC unavailable for {persona}") from e
+    policy = resp.get('Item')
+    if policy is None:
+        # Persona missing → DEFAULT_POLICY (deny-all) NOT allow-all. Logged at WARN
+        # so SOC team sees the unrecognized persona attempt.
+        logger.warning("Unknown persona %s — applying deny-all DEFAULT_POLICY", persona)
+        policy = DEFAULT_POLICY
+    _cache[persona] = policy
+    return policy
 ```
 
 ### 3.6 Guardrail → Strands model wiring
@@ -257,7 +327,9 @@ def build_bedrock_model(model_id: str, guardrail_id: str = '', guardrail_version
 ### 3.7 Monolith gotchas
 
 - **Cedar file parsing.** Splitting on `\n\n` is brittle — a rule with an internal blank line will be split. Use a real Cedar parser (e.g. `cedarpy`) or author rules as one-per-file and glob them.
-- **`validation_mode="IGNORE_ALL_FINDINGS"`** is a dev shortcut. In prod set `VALIDATE` and fix findings rather than ignore them.
+- **`validation_mode`** — R4 default flipped to `VALIDATE`. AFIE Sprint 8 F-GOV-03 found prod stacks shipped with the old `IGNORE_ALL_FINDINGS` default; a typo'd Cedar rule no-op'd for 3 weeks. ONLY set `IGNORE_ALL_FINDINGS` via an explicit stage gate (dev only). NEVER ship it in `prod-*` compliance_class.
+- **DEFAULT_POLICY fail-closed (F-AFIE-08)** — the RBAC loader's fallback policy is `deny_all` / `mask_fields=['*']` / `sql_filter="1=0"`. The OLD allow-all default caused AFIE F-GOV-04 CRITICAL: transient DDB throttle → DEFAULT_POLICY returned → arbitrary tool access granted with no audit trail. The `load_rbac_policy` function now RAISES `RbacLoadError` on DDB failure (no silent allow-all fallback) and emits a `RbacLoadFailure` Powertools metric for paging.
+- **Cedar context envelope (F-AFIE-08)** — §3.2a documents the canonical context envelope (persona / amount / risk_tier / etc.) that consumers MUST pass at every authorize lookup. If a rule references `context.amount > X` but the agent only forwards `{persona, action}`, Cedar treats `context.amount` as undefined → `false` → permit (in `forbid ... when {...}`). AFIE F-GOV-02 retro: $4.7M auto-approval slipped through because the canonical envelope wasn't enforced.
 - **UpdateGateway mode `ENFORCE` vs `LOG_ONLY`** — start in `LOG_ONLY` in staging, review `bedrock-agentcore:AuthorizeAction` CloudTrail events for a week, then switch to `ENFORCE`. Going straight to `ENFORCE` risks blocking legitimate traffic.
 - **`AWS::Bedrock::Guardrail` is L1 via `CfnResource`** because the typed L1 isn't exposed for all properties yet. Watch for L2 / typed L1 emergence in CDK releases.
 - **HITL `sfn.Pass`** states are placeholders — in production replace with `tasks.LambdaInvoke` (or `SqsSendMessage` + `waitForTaskToken`) to actually page approvers and persist the token.

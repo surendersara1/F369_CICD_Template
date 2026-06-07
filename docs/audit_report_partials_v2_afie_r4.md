@@ -45,7 +45,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 7 | LAYER_OBSERVABILITY | WARN (R1) | F-AFIE-05 (SNS CMK uses notifications_key + AFIE F-OBS-02 retro) ✓ + F-AFIE-07 (treat_missing_data on all 4 alarms + 3-row decision table) ✓ + F-AFIE-06 (log retention — applied to upstream LAYER_BACKEND_LAMBDA + AGENTCORE_OBSERVABILITY) ✓ | PASS |
 | 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (4th canonical CMK `notifications_key` with cloudwatch+events+sns principals) ✓ + F-AFIE-09 (identity scoping — pending) | PASS (F-AFIE-05); WARN pending F-AFIE-09 |
 | 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (canary-log retention ONE_MONTH → ONE_YEAR per §3+§4) ✓ | PASS |
-| 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (Cedar context envelope + IGNORE_ALL_FINDINGS trap) | TBD |
+| 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (validation_mode default flipped to VALIDATE + §3.2a canonical Cedar context envelope + DEFAULT_POLICY fail-closed deny-all + RbacLoadError raises instead of silent fallback) ✓ | PASS |
 | 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-09 (identity role scoping) | TBD |
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (VPC-endpoint-only canonical default) | TBD |
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (detective controls live-deploy step) | TBD |
@@ -323,7 +323,56 @@ Additionally (F-FRT-09, finance-grade HSTS): LAYER_FRONTEND §3 used `cf.Respons
 
 ---
 
-### Finding F-AFIE-08 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-08 — HIGH (Cedar context envelope + IGNORE_ALL_FINDINGS trap + DEFAULT_POLICY fail-open) — RESOLVED 2026-06-17
+**Partial fixed:** `AGENTCORE_AGENT_CONTROL.md` §3.2 + §3.2a NEW + §3.5 + §4
+
+**Three sub-issues converged into one finding:**
+
+**F-AFIE-08a — IGNORE_ALL_FINDINGS prod-default trap (AFIE Sprint 8 F-GOV-03):**
+Canonical partial set `validation_mode="IGNORE_ALL_FINDINGS"` as the default for `CfnPolicy`. ms-09 consumer stack copied the partial verbatim. A typo'd Cedar rule (`principal == "user::*"` — wrong syntax) was synthesizable but no-op'd at runtime; agents bypassed governance for 3 weeks until a SOC review caught it.
+
+**F-AFIE-08b — Missing canonical Cedar context envelope (AFIE Sprint 8 F-GOV-02):**
+Cedar rules like `forbid(principal, action, resource) when { context.amount > 1_000_000 }` only enforce if the *evaluation context* carries `amount`. Cedar treats missing attributes as undefined → false → permit (in forbid-when). The canonical partial showed the gateway-association IAM, the policy engine creation, and the rule loader — but NEVER showed what the agent runtime should pass at authorize time. ms-09 forwarded only `{persona, user_id, action}`; the $1M cap rule silently never fired. A $4.7M auto-approval went through.
+
+**F-AFIE-08c — DEFAULT_POLICY allow-all on RBAC load failure (AFIE Sprint 8 F-GOV-04 CRITICAL):**
+The canonical RBAC loader returned `DEFAULT_POLICY = {tool_access: {mode: 'allow_all', allowed: ['*']}}` on `Exception`. A transient DynamoDB read-throttle during a load-spike → exception caught → DEFAULT_POLICY (allow-all) returned → agents were granted unrestricted tool access with no audit trail. The blast radius was limited only by coincidence: the failure window was 4 minutes during overnight maintenance.
+
+**Evidence:** This finding draws from the AFIE Sprint 8 retro queue + Cedar policy language spec (https://docs.cedarpolicy.com/policies/syntax-conditions.html) + AWS Bedrock AgentCore Cedar engine docs. No live MCP doc-read was needed since the failure modes are documented in the Cedar spec + the AFIE finding queue.
+
+**Fix applied:**
+
+1. **§3.2 + §4 CfnPolicy `validation_mode`** — default flipped to `VALIDATE`. Inline comment explains the AFIE F-GOV-03 retro (typo'd rule no-op'd 3 weeks) and that consumers may set `IGNORE_ALL_FINDINGS` ONLY via an explicit stage gate (dev only, never prod-*).
+
+2. **§3.2a NEW subsection — Canonical Cedar context envelope** — full schema:
+   - WHO: persona, user_id, session_id, tenant_id
+   - WHAT: action_category, tool_name, resource_arn
+   - HOW MUCH: amount, currency, risk_tier ← THE F-GOV-02 root cause
+   - WHEN: request_ts, session_age_secs
+   - WHERE: source_ip, channel
+   - Inline AFIE F-GOV-02 retro on the $4.7M slip + forward-ref to F-AFIE-22 synth-guard rule `assert_cedar_rule_envelope_attrs_resolvable`.
+
+3. **§3.5 RBAC loader fail-closed default**:
+   - `DEFAULT_POLICY` flipped: agent_access all `False`; tool_access `mode='deny_all'`, `allowed=[]`, `denied=['*']`; data_filter `mask_fields=['*']`, `sql_filter='1=0'`.
+   - `load_rbac_policy` now RAISES `RbacLoadError` on DDB exception instead of returning the silent fallback.
+   - Emits Powertools `RbacLoadFailure` metric for paging (caller wires `aws_lambda_powertools.Metrics`).
+   - Persona-not-found case (item missing in DDB) → DEFAULT_POLICY (deny-all), logged at WARN so SOC sees the unrecognized persona attempt.
+
+4. **§3.1 / §4 gotchas** — three new entries codifying each of the three failures above with the AFIE retro IDs.
+
+**Header bumped:** AGENTCORE_AGENT_CONTROL 2.0 → 2.1 with R4 update banner.
+
+**Recommended next steps (deferred to F-AFIE-22):**
+- `assert_cedar_validation_mode_strict_in_prod` — fails synth if `compliance_class.startswith("prod-")` and any `CfnPolicy` has `validation_mode="IGNORE_ALL_FINDINGS"`.
+- `assert_cedar_rule_envelope_attrs_resolvable` — parses every cedar statement at synth time, extracts referenced `context.*` attrs, and fails if any aren't in CANONICAL_CEDAR_CONTEXT.
+- `assert_rbac_loader_no_silent_fallback` — greps the RBAC loader source for `return DEFAULT_POLICY` inside an exception handler.
+
+**MCP audit sources:** Cedar policy language spec (https://docs.cedarpolicy.com/policies/syntax-conditions.html) for undefined-attribute semantics. AWS Bedrock AgentCore docs referenced in existing §2.
+
+**grep -r sweep (deferred to Tier 8):** scan for `validation_mode="IGNORE_ALL_FINDINGS"` in any partial/kit/composite; scan for `DEFAULT_POLICY` patterns with `'allow_all'` or `'*'` in `allowed`.
+
+---
+
+### Finding F-AFIE-09 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
