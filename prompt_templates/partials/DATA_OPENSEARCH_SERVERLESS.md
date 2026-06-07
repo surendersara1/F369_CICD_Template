@@ -1,6 +1,7 @@
 # SOP — Amazon OpenSearch Serverless (Time Series · Vector Search · Search · Dashboards · index policies)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-10):** §3 Monolith network policy now defaults `AllowFromPublic=False` + requires `source_vpce_ids` constructor parameter (asserted at synth time unless `compliance_class="dev"`). The §5 Production VPC-endpoint pattern is now the default behavior rather than a separate variant. §6 gotcha entry codifies the AFIE Sprint 10 F-DATA-03 retro: KMS-at-rest does NOT compensate for a public data plane because SigV4 is the only auth boundary. Forward-ref to F-AFIE-22 synth-guard `assert_oss_network_policy_no_public_in_prod`.
 **Applies to:** AWS CDK v2 (Python 3.12+) · OpenSearch Serverless (collections) · 3 collection types: TIMESERIES, VECTORSEARCH, SEARCH · OCUs (OpenSearch Compute Units) — 2 indexing + 2 search minimum · Encryption + network + data access policies · IAM-based auth via SigV4 · OpenSearch Dashboards · ISM (Index State Management)
 
 ---
@@ -73,7 +74,13 @@ import json
 
 class OssStack(Stack):
     def __init__(self, scope: Construct, id: str, *, env_name: str,
-                 firehose_role_arn: str, dashboard_user_arns: list[str], **kwargs):
+                 firehose_role_arn: str, dashboard_user_arns: list[str],
+                 # F-AFIE-10: VPC-endpoint-only by default. source_vpce_ids must be
+                 # supplied for any non-dev compliance_class; AllowFromPublic is the
+                 # dev-only fallback.
+                 source_vpce_ids: list[str] | None = None,
+                 compliance_class: str = "prod-internal",
+                 **kwargs):
         super().__init__(scope, id, **kwargs)
 
         collection_name = f"{env_name}-events-ts"
@@ -92,18 +99,40 @@ class OssStack(Stack):
             }),
         )
 
-        # ── 2. Network policy — public access (or VPC endpoint for prod) ─
+        # ── 2. Network policy — VPC-endpoint-only by default (F-AFIE-10) ─
+        # AFIE Sprint 10 F-DATA-03 HIGH: ms-09 deployed AllowFromPublic=True for
+        # "ease of testing"; SecurityRiskAccount auditor flagged it because IAM SigV4
+        # is the ONLY thing standing between any AWS account holder globally and the
+        # data plane. KMS-at-rest doesn't help when the API is public + auth is a
+        # SigV4 signature that a credential leak compromises end-to-end.
+        # R4 default: AllowFromPublic=False; source_vpce_ids is REQUIRED parameter.
+        # Set AllowFromPublic=True ONLY via dev-stage explicit flag.
+        assert source_vpce_ids or compliance_class == "dev", (
+            "F-AFIE-10: OpenSearch Serverless network policy must list source_vpce_ids "
+            "for any non-dev compliance_class. Set compliance_class='dev' to use the "
+            "AllowFromPublic=True fallback for local experimentation."
+        )
+        if compliance_class == "dev" and not source_vpce_ids:
+            network_rules = [{
+                "Rules": [
+                    {"ResourceType": "collection", "Resource": [f"collection/{collection_name}"]},
+                    {"ResourceType": "dashboard",  "Resource": [f"collection/{collection_name}"]},
+                ],
+                "AllowFromPublic": True,
+            }]
+        else:
+            network_rules = [{
+                "Rules": [
+                    {"ResourceType": "collection", "Resource": [f"collection/{collection_name}"]},
+                    {"ResourceType": "dashboard",  "Resource": [f"collection/{collection_name}"]},
+                ],
+                "AllowFromPublic": False,
+                "SourceVPCEs": source_vpce_ids,
+            }]
         oss.CfnSecurityPolicy(self, "NetworkPolicy",
             name=f"{collection_name}-net",
             type="network",
-            policy=json.dumps([{
-                "Rules": [
-                    {"ResourceType": "collection", "Resource": [f"collection/{collection_name}"]},
-                    {"ResourceType": "dashboard", "Resource": [f"collection/{collection_name}"]},
-                ],
-                "AllowFromPublic": True,                          # PROD: set False + use SourceVPCEs
-                # "SourceVPCEs": ["vpce-XXXXXX"],
-            }]),
+            policy=json.dumps(network_rules),
         )
 
         # ── 3. Collection ─────────────────────────────────────────────
@@ -324,6 +353,7 @@ oss.CfnSecurityPolicy(self, "PrivateNetwork",
 
 ## 6. Common gotchas
 
+- **R4 / F-AFIE-10: VPC-endpoint-only is the prod default.** §3 + §4 + §5 now require `source_vpce_ids` for any non-dev compliance_class. `AllowFromPublic=True` is the dev-only fallback; the `assert` at the top of the network-policy section catches accidental prod-public deployments at synth time. AFIE Sprint 10 F-DATA-03 retro: KMS-at-rest does NOT compensate for a public data plane — IAM SigV4 is the only auth, a credential leak compromises the collection globally. Forward-ref: F-AFIE-22 `assert_oss_network_policy_no_public_in_prod` synth-guard.
 - **OS Serverless has a 2 OCU minimum (1 indexing + 1 search) per collection** — $0.24/OCU-hour = ~$350/mo per collection minimum. For dev, share collections across apps if budget tight.
 - **Standby replicas (multi-AZ) DOUBLE the OCU cost.** Prod-only in many cases.
 - **OS Serverless does NOT support all OpenSearch APIs** — no `_cluster/health`, no `_cat/*` (some), no snapshots (managed automatically).

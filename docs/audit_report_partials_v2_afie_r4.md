@@ -47,7 +47,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (canary-log retention ONE_MONTH → ONE_YEAR per §3+§4) ✓ | PASS |
 | 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (validation_mode default flipped to VALIDATE + §3.2a canonical Cedar context envelope + DEFAULT_POLICY fail-closed deny-all + RbacLoadError raises instead of silent fallback) ✓ | PASS |
 | 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-01 (3-ARN Bedrock InvokeModel; landed 2026-06-16 as v2.1) + F-AFIE-09 (§3 `_create_agent_role` signature redesigned: needs_* booleans → required `*_arns: list[str]` + opt-in `permit_wildcard`) ✓ | PASS |
-| 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (VPC-endpoint-only canonical default) | TBD |
+| 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (AllowFromPublic flipped True→False; source_vpce_ids required for non-dev; synth-time assert) ✓ | PASS |
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (detective controls live-deploy step) | TBD |
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (partial scoping for InvokeAgentRuntime/Gateway) | TBD |
 | 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (scale-to-zero default) | TBD |
@@ -413,7 +413,36 @@ Canonical partial §3.1 used `needs_gateway: bool` / `needs_sub_agents: bool` / 
 
 ---
 
-### Finding F-AFIE-10 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-10 — HIGH (OpenSearch Serverless public-endpoint default) — RESOLVED 2026-06-17
+**Partial fixed:** `DATA_OPENSEARCH_SERVERLESS.md` §3 + §6
+
+**Issue (from AFIE Sprint 10 F-DATA-03 HIGH):** Consumer ms-09 stack deployed an OpenSearch Serverless collection with the canonical partial's default `AllowFromPublic: True` for "ease of testing" during early sprints. Sprint 10 SecurityRiskAccount audit flagged it because IAM SigV4 is the only auth boundary; a credential leak in any AWS account compromises the data plane globally. KMS-at-rest does not compensate (data has to be decrypted server-side to answer queries). The canonical partial documented the VPC-endpoint pattern in §5 "Production" as a separate variant rather than the default, making it easy for consumers to ship §3 verbatim.
+
+**Evidence (verified live this session via library inspection):**
+- `DATA_OPENSEARCH_SERVERLESS.md` §3 line 104 — confirmed `AllowFromPublic: True` was the default; the source_vpce_ids was commented out as an optional override.
+- `DATA_OPENSEARCH_SERVERLESS.md` §5 lines 298-348 — confirmed the VPC-endpoint pattern existed but as a separate "Production Variant" rather than the default.
+
+**Fix applied:**
+
+1. **§3 Monolith network policy** — restructured:
+   - Constructor signature gains `source_vpce_ids: list[str] | None = None` + `compliance_class: str = "prod-internal"`.
+   - Top of §3.1 network-policy section: `assert source_vpce_ids or compliance_class == "dev"` — fails at synth time if non-dev consumer forgot to provide endpoints.
+   - Branch: `compliance_class == "dev" and not source_vpce_ids` → `AllowFromPublic=True` (explicit dev fallback). Otherwise → `AllowFromPublic=False` + `SourceVPCEs=source_vpce_ids`.
+   - Inline AFIE F-DATA-03 retro comment explaining the SigV4-only-auth failure mode.
+
+2. **§6 Common gotchas** — added top-of-list bullet codifying the lesson + forward-ref to F-AFIE-22 synth-guard `assert_oss_network_policy_no_public_in_prod`.
+
+**Header bumped:** DATA_OPENSEARCH_SERVERLESS 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_oss_network_policy_no_public_in_prod` — fails synth if any `AWS::OpenSearchServerless::SecurityPolicy` of `type=network` has `AllowFromPublic: true` and `compliance_class` is in `prod-*`.
+
+**MCP audit sources:** Used library inspection + canonical OpenSearch Serverless network policy semantics (https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-network.html) — the doc states `AllowFromPublic` and `SourceVPCEs` are mutually exclusive in the same rule; the canonical secure pattern is `AllowFromPublic: false` + populated `SourceVPCEs`. No new MCP doc-read required since the canonical pattern was already referenced in §5 of the existing partial.
+
+**grep -r sweep (deferred to Tier 8):** scan for any `AllowFromPublic.*[Tt]rue` in non-dev contexts across `partials/` + `kits/` + `templates/composite/`.
+
+---
+
+### Finding F-AFIE-11 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
