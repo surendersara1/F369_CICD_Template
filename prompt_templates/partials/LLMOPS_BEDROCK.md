@@ -1,6 +1,7 @@
 # SOP — LLMOps (Amazon Bedrock, Prompts, Guardrails, Knowledge Base, Agents)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active (CANONICAL for Bedrock InvokeModel ARN shapes)
+**R4 update (2026-06-16):** §3.1 + §4 InvokeModel IAM grants restructured to the canonical 3-ARN pattern (`foundation-model/*` + `inference-profile/*` + `application-inference-profile/*`). Default model bumped from Claude 3 Sonnet/Haiku (Legacy/EOL) to Claude Sonnet 4.5 + Haiku 4.5 (Active). Closes AFIE Sprint 10 G-NEW-01 deploy-blocker. AWS docs: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html + https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock · SSM Parameter Store
 
 ---
@@ -44,20 +45,45 @@ def _create_ai(self, stage: str) -> None:
     account = self.account
 
     # Models this project uses (environment-specific for safety)
-    default_model  = "anthropic.claude-3-sonnet-20240229-v1:0"
-    fallback_model = "anthropic.claude-3-haiku-20240307-v1:0"
+    # CURRENT ACTIVE MODELS as of 2026-06-16 (verify against
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html):
+    #   - Claude Sonnet 4.5 (Active)        | claude-3 Sonnet/Haiku are LEGACY / EOL'd
+    #   - Claude Haiku 4.5 (Active)         |
+    #   - Titan-embed-text v2 (Active)      | v1 is Legacy
+    #   - Nova Sonic v2 (Active)            | v1 is Legacy
+    default_model  = "anthropic.claude-sonnet-4-5-20250929-v1:0"   # Active
+    fallback_model = "anthropic.claude-haiku-4-5-20251001-v1:0"    # Active
+
+    # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+    # The CANONICAL 3-ARN pattern — foundation-model + inference-profile + application-inference-profile.
+    # Cross-region inference profiles (e.g. `us.anthropic.claude-sonnet-4-5-…`,
+    # `global.anthropic.claude-sonnet-4-…`) AccessDenied if only foundation-model/* granted.
+    # Application inference profiles (Bedrock console-created) need their own ARN class too.
+    # This was AFIE-CPG Sprint 10's G-NEW-01 production blocker.
     model_arns = [
+        # Foundation-model ARNs (account-empty `::` is correct — global resource)
         f"arn:aws:bedrock:{region}::foundation-model/{default_model}",
         f"arn:aws:bedrock:{region}::foundation-model/{fallback_model}",
+        # Cross-region inference profile ARNs (account-scoped)
+        f"arn:aws:bedrock:*:{account}:inference-profile/*",
+        # Application inference profiles (Bedrock console-created)
+        f"arn:aws:bedrock:*:{account}:application-inference-profile/*",
     ]
+    # ALTERNATIVE — broader "any active Bedrock model" pattern (use when SSM-driven
+    # model swap is the canonical consumer path; keeps grant stable across model rotations):
+    #   model_arns = [
+    #       f"arn:aws:bedrock:*::foundation-model/*",
+    #       f"arn:aws:bedrock:*:{account}:inference-profile/*",
+    #       f"arn:aws:bedrock:*:{account}:application-inference-profile/*",
+    #   ]
 
-    # Model invocation — scoped to these specific models
+    # Model invocation — scoped per the model_arns list above
     self.bedrock_policy = iam.ManagedPolicy(
         self, "BedrockInvokePolicy",
         managed_policy_name=f"{{project_name}}-bedrock-invoke-{stage}",
         statements=[
             iam.PolicyStatement(
-                sid="InvokeSpecificModels",
+                sid="InvokeBedrockModels",
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=model_arns,
             ),
@@ -156,11 +182,18 @@ class AiStack(cdk.Stack):
         super().__init__(scope, "{project_name}-ai", **kwargs)
 
         region, account = self.region, self.account
-        default_model  = "anthropic.claude-3-sonnet-20240229-v1:0"
-        fallback_model = "anthropic.claude-3-haiku-20240307-v1:0"
+        # See §3.1 for the canonical 3-ARN pattern + current Active model list.
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        default_model  = "anthropic.claude-sonnet-4-5-20250929-v1:0"   # Active (was claude-3-sonnet — Legacy/EOL)
+        fallback_model = "anthropic.claude-haiku-4-5-20251001-v1:0"    # Active (was claude-3-haiku — Legacy/EOL)
         model_arns = [
+            # Foundation-model ARNs
             f"arn:aws:bedrock:{region}::foundation-model/{default_model}",
             f"arn:aws:bedrock:{region}::foundation-model/{fallback_model}",
+            # Cross-region inference profile ARNs (REQUIRED for us./global. prefixed model IDs)
+            f"arn:aws:bedrock:*:{account}:inference-profile/*",
+            # Application inference profiles (Bedrock console-created)
+            f"arn:aws:bedrock:*:{account}:application-inference-profile/*",
         ]
 
         self.bedrock_policy = iam.ManagedPolicy(

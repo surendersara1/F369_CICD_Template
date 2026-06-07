@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore Runtime (Managed Serverless Agent & MCP Server Hosting)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** §3.2 + §4 Bedrock InvokeModel grants now include `inference-profile/*` and `application-inference-profile/*` ARN classes alongside `foundation-model/*`. Cross-region inference profiles (e.g. `us.anthropic.claude-sonnet-4-5-…`) require all three. Closes AFIE-CPG Sprint 10 G-NEW-01 deploy-blocker. AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · `aws-cdk.aws-bedrock-agentcore-alpha` · `aws-cdk-lib.aws-bedrock-agentcore-alpha` ≥ 2.160 · ARM64 (Graviton) · Python 3.13 container · Strands SDK v1.34+
 
 ---
@@ -82,9 +83,18 @@ def _create_agent_runtime(
             iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
         ),
     )
+    # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+    # Cross-region inference profiles (e.g. `us.anthropic.claude-sonnet-4-5-…`) REQUIRE both the
+    # `inference-profile/*` ARN AND the underlying `foundation-model/*` ARN in the SAME statement.
+    # Application inference profiles (Bedrock console-created) need their own ARN class. Granting
+    # only `foundation-model/*` is the AFIE-CPG production blocker (Sprint 10 G-NEW-01).
     execution_role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
     execution_role.add_to_policy(iam.PolicyStatement(
         actions=["ssm:GetParameter", "ssm:GetParameters"],
@@ -357,9 +367,16 @@ class ObserverAgentStack(cdk.Stack):
             assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         )
         # Identity-side grants only — every resource is cross-stack
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # See §3.2 above — the 3-ARN Bedrock InvokeModel pattern is canonical; cross-region
+        # inference profiles (us./global. prefix) AccessDenied without `inference-profile/*`.
         execution_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-            resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+            resources=[
+                f"arn:aws:bedrock:*::foundation-model/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+            ],
         ))
         execution_role.add_to_policy(iam.PolicyStatement(
             actions=["ssm:GetParameter", "ssm:GetParameters"],

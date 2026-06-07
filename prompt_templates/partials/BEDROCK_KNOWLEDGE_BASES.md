@@ -1,6 +1,7 @@
 # SOP — Bedrock Knowledge Bases (chunking strategies · vector store options · hybrid search · metadata filters · multi-tenant · citations)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-27 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). Embedding/parsing/rerank `model_arn=` references in `CfnDataSource`/`Retrieve` API calls are unchanged (those take specific foundation-model ARNs — not affected by the inference-profile gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock Knowledge Bases (GA Nov 2023) · Vector store options: OpenSearch Serverless / Aurora PostgreSQL pgvector / Pinecone / Redis Cloud / MongoDB Atlas / Neptune Analytics · Chunking strategies: default + fixed + hierarchical + semantic + custom Lambda · Hybrid search (BM25 + vector) · Metadata filters · Multi-tenant via filters · Generation models: Claude / Llama / Mistral · Citations + retrieval-only API
 
 ---
@@ -167,8 +168,14 @@ class BedrockKbStack(Stack):
         # Bedrock embedding model invoke
         kb_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # KB ingestion needs embedding-model access (Titan v2 stays specific) AND, if the
+            # generation models swap to a cross-region inference profile, those ARN classes.
+            # See LLMOPS_BEDROCK §3.1 for the canonical 3-ARN pattern.
             resources=[
                 f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-embed-text-v2:0",
+                f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                f"arn:aws:bedrock:*:{self.account}:application-inference-profile/*",
             ],
         ))
         # OpenSearch Serverless data plane

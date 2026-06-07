@@ -1,6 +1,7 @@
 # SOP — Bedrock Flows + Prompt Management (visual orchestration · prompt versions · A/B testing · prompt routing)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-27 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock Flows (GA Aug 2024) · Bedrock Prompt Management API · Prompt versions + drafts + variants · A/B testing via prompt variants · Prompt routing (route by classifier) · Flow nodes (Prompt + Lambda + KB + Agent + Iterator + Storage + Condition) · Flow versions
 
 ---
@@ -100,9 +101,14 @@ class BedrockFlowStack(Stack):
         )
         flow_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # Cross-region inference profiles (us./global. prefix) need their own ARN class.
+            # See LLMOPS_BEDROCK §3.1 for the canonical 3-ARN pattern.
             resources=[
                 f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-haiku-4-5-20251001",
                 f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
+                f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                f"arn:aws:bedrock:*:{self.account}:application-inference-profile/*",
             ],
         ))
 

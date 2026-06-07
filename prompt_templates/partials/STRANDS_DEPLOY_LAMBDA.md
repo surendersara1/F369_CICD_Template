@@ -1,6 +1,7 @@
 # SOP — Strands Deploy to Lambda (MCP Proxy, Direct Target, Standalone Agent)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` alongside `foundation-model/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Lambda Python 3.13 · ARM64 (Graviton) · Strands SDK Lambda Layer (v1.23.0+) · boto3 ≥ 1.34
 
 ---
@@ -153,7 +154,13 @@ def _create_standalone_agent(self) -> _lambda.Function:
     # Identity-side Bedrock grant
     agent_fn.add_to_role_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # Cross-region inference profiles (us./global. prefix) require inference-profile/* AND foundation-model/* together.
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
     return agent_fn
 ```
@@ -385,7 +392,13 @@ class ComputeStack(cdk.Stack):
         # Identity-side Bedrock grant
         self.standalone_agent_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-            resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # Cross-region inference profiles (us./global. prefix) require inference-profile/* AND foundation-model/* together.
+            resources=[
+                f"arn:aws:bedrock:*::foundation-model/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+            ],
         ))
 
         # Shared permission boundary

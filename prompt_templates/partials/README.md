@@ -1,7 +1,7 @@
 # F369 Partials — Library Index + Canonical Registry
 
 **Location:** `E:\F369_CICD_Template\prompt_templates\partials\`
-**Count:** 143 v2.0 partials (as of 2026-04-28 — Wave 19 added 3 Data Quality + DataZone + Mesh partials; Wave 18 added 3 Q Developer + agentic refactor partials; Wave 17 added 3 CDN/edge compute partials; Wave 15 added 4 Bedrock Q Business + KB + Multi-Agent partials; Wave 16 added 3 ECS production partials; Wave 14 added 4 DR/resilience partials; Wave 13 added 4 migration partials; Wave 12 added 4 streaming analytics partials; Wave 11 added 6 enterprise governance partials)
+**Count:** 143 v2.0 partials (as of 2026-04-28; **R4 2026-06-16** bumped 11 partials to v2.1 — AGENTCORE_RUNTIME/A2A/IDENTITY, STRANDS_DEPLOY_ECS/LAMBDA, LLMOPS_BEDROCK, BEDROCK_FLOWS_PROMPT_MGMT/AGENTS_MULTI_AGENT/KNOWLEDGE_BASES, MLOPS_CANVAS_NO_CODE, PATTERN_DOC_INGESTION_RAG — to land the F-AFIE-01 inference-profile/* IAM fix; see [`docs/audit_report_partials_v2_afie_r4.md`](../../docs/audit_report_partials_v2_afie_r4.md))
 **Authoring prompts:** [`_prompts/`](_prompts/README.md)
 
 A partial is a self-contained SOP for one AWS concern — a CDK construct, an agent pattern, an IAM pattern, a compliance control, etc. Partials are consumed by LLM prompts (see the companion repo `F369_LLM_TEMPLATES`) that chain 3–15 partials into a 2-week client engagement (a "kit").
@@ -46,7 +46,7 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 | [`LAYER_BACKEND_ECS.md`](LAYER_BACKEND_ECS.md) | ECS + Fargate base patterns | R1 | PASS |
 | [`EVENT_DRIVEN_PATTERNS.md`](EVENT_DRIVEN_PATTERNS.md) | Cross-stack EventBridge (`CfnRule` + static-ARN target) | R1 | PASS |
 | [`EVENT_DRIVEN_FAN_IN_AGGREGATOR.md`](EVENT_DRIVEN_FAN_IN_AGGREGATOR.md) | Fan-in aggregator for multi-source events | R2 | PASS |
-| [`LLMOPS_BEDROCK.md`](LLMOPS_BEDROCK.md) | Bedrock `InvokeModel` + inference profile ARN shapes | R1 | PASS |
+| [`LLMOPS_BEDROCK.md`](LLMOPS_BEDROCK.md) | Bedrock `InvokeModel` 3-ARN canonical (foundation-model + inference-profile + application-inference-profile); current Active model defaults | R1 → R4 fix | PASS ⭐ **must-copy for any partial granting bedrock:InvokeModel** |
 | [`COMPLIANCE_HIPAA_PCIDSS.md`](COMPLIANCE_HIPAA_PCIDSS.md) | Audit bucket + Backup Vault Lock + Config rules | R1 | PASS |
 | [`SECURITY_WAF_SHIELD_MACIE.md`](SECURITY_WAF_SHIELD_MACIE.md) | WAF + Shield + Macie | R1 | PASS |
 
@@ -89,7 +89,7 @@ This is the authoritative list of canonical partials — the ones whose §3/§4 
 
 | Canonical partial | Covers | First audited | Status |
 |---|---|---|---|
-| [`AGENTCORE_RUNTIME.md`](AGENTCORE_RUNTIME.md) | AgentCore Runtime alpha L2 + `CfnRuntime` L1 fallback | R2 | WARN (alpha drift) |
+| [`AGENTCORE_RUNTIME.md`](AGENTCORE_RUNTIME.md) | AgentCore Runtime alpha L2 + `CfnRuntime` L1 fallback; 3-ARN Bedrock InvokeModel grant | R2 → R4 fix | WARN (alpha drift) → PASS (R4 IAM fix) |
 | [`AGENTCORE_GATEWAY.md`](AGENTCORE_GATEWAY.md) | MCP Gateway + targets | R2 | PASS |
 | [`AGENTCORE_IDENTITY.md`](AGENTCORE_IDENTITY.md) | Workload identity pools; OBO tokens | R2 | PASS |
 | [`AGENTCORE_MEMORY.md`](AGENTCORE_MEMORY.md) | STM + LTM strategies | R2 | PASS |
@@ -307,7 +307,7 @@ Quick lookup — "I'm authoring a partial that uses X. Where do I copy from?"
 | AgentCore Identity (OBO) | `AGENTCORE_IDENTITY.md` | §3 |
 | AgentCore Code Interpreter | `AGENTCORE_CODE_INTERPRETER.md` | §3.2 + §4.2 (scoped ARN) |
 | Strands Agent | `STRANDS_AGENT_CORE.md` + `STRANDS_TOOLS.md` | §3 |
-| Bedrock InvokeModel | `LLMOPS_BEDROCK.md` | §3 (inference profile ARN shape) |
+| Bedrock InvokeModel (3-ARN canonical) | `LLMOPS_BEDROCK.md` | §3.1 (foundation-model + inference-profile + application-inference-profile pattern) — **R4 update 2026-06-16** |
 | QuickSight Q | `MLOPS_QUICKSIGHT_Q.md` | §3.2 (Topic) + §3.3 (embed SDK) |
 | Cross-stack EventBridge | `EVENT_DRIVEN_PATTERNS.md` | §4 |
 | Bucket + CloudFront OAC | `LAYER_FRONTEND.md` | §4 |

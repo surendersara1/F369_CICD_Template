@@ -1,6 +1,7 @@
 # SOP — Document Ingestion RAG Pipeline (parse → chunk → embed → store)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-22 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · S3 raw + EventBridge · Textract / Unstructured / PyPDF · Bedrock Titan Text Embeddings v2 (1024 / 512 / 256 dims) · Amazon S3 Vectors (primary) · Bedrock Knowledge Base (managed alternative) · DynamoDB doc-metadata table · SQS DLQ · SHA256-deterministic idempotency key
 
 ---
@@ -203,8 +204,14 @@ def _create_doc_ingestion_rag(self, stage: str) -> None:
     #   Bedrock: identity-side always — no L2 grant exists for foundation model ARNs.
     self.ingestion_fn.add_to_role_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # Titan-embed-text-v2 stays as specific foundation-model ARN (correct for embeddings).
+        # If consumer adds cross-region inference profile-routed generation: inference-profile/* needed.
+        # See LLMOPS_BEDROCK §3.1 for the canonical 3-ARN pattern.
         resources=[
             f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-embed-text-v2:0",
+            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+            f"arn:aws:bedrock:*:{self.account}:application-inference-profile/*",
         ],
     ))
     #   Textract async.
@@ -826,8 +833,12 @@ class IngestionStack(cdk.Stack):
         # Bedrock InvokeModel — resource ARN is regional + model-specific.
         ingestion_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # See above § for the rationale on adding inference-profile ARNs to embedding pipelines.
             resources=[
                 f"arn:aws:bedrock:{Aws.REGION}::foundation-model/{embed_model_id}",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
             ],
         ))
         # Textract — all service-level ARNs.

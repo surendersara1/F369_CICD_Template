@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore Identity (IAM SigV4, Cognito, Per-Agent Roles)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` alongside `foundation-model/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · `aws_iam` · `aws_cognito` · SigV4 / `botocore.auth` · `httpx` ≥ 0.27 · MCP streamable HTTP transport
 
 ---
@@ -59,7 +60,13 @@ def _create_agent_role(
     # Base: Bedrock model invocation (cross-region inference profile)
     role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # Cross-region inference profiles need inference-profile/* AND foundation-model/* together.
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
     # Base: SSM read under project prefix
     role.add_to_policy(iam.PolicyStatement(
@@ -293,7 +300,13 @@ def build_agent_role(
     )
     role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{cdk.Aws.REGION}::foundation-model/*"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # See §3 — 3-ARN Bedrock InvokeModel pattern is canonical (foundation-model + inference-profile + application-inference-profile).
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{cdk.Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{cdk.Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
     role.add_to_policy(iam.PolicyStatement(
         actions=["ssm:GetParameter", "ssm:GetParameters"],

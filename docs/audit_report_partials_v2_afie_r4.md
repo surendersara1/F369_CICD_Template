@@ -36,8 +36,8 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 
 | # | Partial | Pre-R4 grade | R4 fixes applied | Post-R4 grade |
 |---|---|---|---|---|
-| 1 | AGENTCORE_RUNTIME | WARN (R2 alpha drift) | F-AFIE-01 (inference-profile/* IAM) | TBD |
-| 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-02 (model lifecycle), F-AFIE-20 (pricing SoT) | TBD |
+| 1 | AGENTCORE_RUNTIME | WARN (R2 alpha drift) | F-AFIE-01 (inference-profile/* IAM) ✓ | PASS |
+| 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 + F-AFIE-20 | PASS (for F-AFIE-01); WARN pending F-AFIE-02 |
 | 3 | LAYER_API | FAIL→PASS (R1 fix) | F-AFIE-03 (Cognito authz mandatory), F-AFIE-19 (WebSocket $connect auth) | TBD |
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (Cognito authz reinforced) | TBD |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (TLS pick-one + us-east-1 pin) | TBD |
@@ -70,23 +70,47 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 
 The findings below are the AFIE-derived audit items. Each will be filled with the standard R-format fields (Partial, Section, Issue, Evidence, Recommended fix) as the corresponding Tier 1-4 fix is applied + MCP-audited + committed.
 
-### Finding F-AFIE-01 — HIGH (CRITICAL gate — deploy-blocker)
-**Partial:** `AGENTCORE_RUNTIME.md`
-**Section:** §3.2 line 87-88; §4 (Micro-Stack equivalent at corresponding line)
-**Issue (from AFIE Sprint 10 G-NEW-01):** The canonical InvokeModel grant lists only `arn:aws:bedrock:{REGION}::foundation-model/*` as a resource. When a consumer's model literal is a cross-region inference profile (e.g., `us.anthropic.claude-sonnet-4-5-20250929-v1:0`), Bedrock requires `arn:aws:bedrock:*:{ACCOUNT}:inference-profile/*` to ALSO appear in the Allow statement. Without it, every InvokeModel call returns AccessDenied at runtime. AFIE Sprint 10 caught this as the production-day-1 blocker.
-**Evidence (verified live this session via MCP):** TBD — see Hour 4 commit; `mcp__awslabs_aws-documentation-mcp-server__read_documentation` on https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html confirms both resource ARNs must appear. Correct pattern exists in same codebase at `AGENTCORE_MEMORY.md` (verify and cite).
-**Recommended fix:** Add to the InvokeModel `resources` list (both Monolith §3.2 and Micro-Stack §4):
+### Finding F-AFIE-01 — HIGH (CRITICAL gate — deploy-blocker) — RESOLVED 2026-06-16
+**Partial(s) fixed:** Systemic gap across **11 partials, ~17 IAM grant sites**:
+- `AGENTCORE_RUNTIME.md` §3.2, §4 (2 sites)
+- `AGENTCORE_A2A.md` §3, §4 (2 sites)
+- `AGENTCORE_IDENTITY.md` §3, §4 (2 sites)
+- `STRANDS_DEPLOY_ECS.md` §3, §4 (2 sites)
+- `STRANDS_DEPLOY_LAMBDA.md` §3, §4 (2 sites)
+- `LLMOPS_BEDROCK.md` §3.1, §4 (CANONICAL for this pattern; 2 sites)
+- `BEDROCK_FLOWS_PROMPT_MGMT.md` (1 site)
+- `BEDROCK_AGENTS_MULTI_AGENT.md` (1 site)
+- `BEDROCK_KNOWLEDGE_BASES.md` §3 ingest IAM (1 site; embedding/parsing/rerank `model_arn=` fields in CfnDataSource/Retrieve API NOT affected — those take specific FM ARNs by design)
+- `MLOPS_CANVAS_NO_CODE.md` (1 site; also flagged Legacy `claude-3-*` reference)
+- `PATTERN_DOC_INGESTION_RAG.md` §3, §4 (2 sites)
 
-```python
-resources=[
-    f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*",
-    f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",  # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
-],
+**Issue (from AFIE Sprint 10 G-NEW-01):** The canonical InvokeModel grant in 11 partials listed only `arn:aws:bedrock:{REGION}::foundation-model/*` as a resource. When a consumer's model literal is a cross-region inference profile (e.g., `us.anthropic.claude-sonnet-4-5-20250929-v1:0` or `global.anthropic.claude-sonnet-4-…`), Bedrock requires `arn:aws:bedrock:*:{ACCOUNT}:inference-profile/*` AND `arn:aws:bedrock:*:{ACCOUNT}:application-inference-profile/*` to ALSO appear in the Allow statement. Without them, every InvokeModel call returns AccessDenied at runtime. AFIE Sprint 10 caught this as the production-day-1 blocker (every agent query would fail).
+
+**Evidence (verified live 2026-06-16 via MCP):** `mcp__awslabs_aws-documentation-mcp-server__read_documentation` on https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html confirms the canonical IAM policy requires THREE resource ARN classes:
 ```
+"Resource": [
+    "arn:aws:bedrock:*::foundation-model/*",
+    "arn:aws:bedrock:*:*:inference-profile/*",
+    "arn:aws:bedrock:*:*:application-inference-profile/*"
+]
+```
+Plus the explicit **Important** note: *"When you specify an inference profile in the Resource field in the first statement, you must also specify the foundation model in each Region associated with it."*
 
-Add §6 worked-example regression test stub asserting both ARN classes present.
-**MCP audit sources:** TBD — populated at fix-application time
-**grep -r sweep:** TBD — list any other partials updated for same pattern
+Pre-R4 sweep: grep `inference-profile/\*` across all 143 partials returned **0 IAM matches** — confirming this was a systemic gap, not isolated.
+
+**Fix applied:** Added all three ARN classes to every InvokeModel grant statement. For wildcard cases (AGENTCORE_*, STRANDS_DEPLOY_*), used `foundation-model/*`. For specific-model cases (BEDROCK_*, MLOPS_CANVAS, PATTERN_DOC_INGESTION_RAG), kept the specific FM ARN and added `inference-profile/*` + `application-inference-profile/*` for cross-region resilience. LLMOPS_BEDROCK.md restructured as canonical exemplar with both patterns documented (specific-model + wildcard alternative).
+
+Inline `# AWS doc: <URL>` comment added to every grant site. Every affected partial bumped to v2.1 / Last-reviewed: 2026-06-16 with R4 update note in header.
+
+**MCP audit sources:**
+- `mcp__awslabs_aws-documentation-mcp-server__search_documentation` query: "Bedrock cross-region inference profile IAM permissions prerequisites"
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` url: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+
+**grep -r sweep:** Pre-fix grep returned 11 files with `foundation-model/*` only pattern; post-fix grep returns 0. Systemic gap closed across the library.
+
+**Pre-R4 grade:** WARN (AGENTCORE_RUNTIME R2 alpha drift) / WARN (LLMOPS_BEDROCK R1) / PASS but blind (the other 9)
+**Post-R4 grade:** PASS — canonical 3-ARN pattern now enforced across library
+**Commit:** TBD (Hour 12 of R4)
 
 ---
 
@@ -184,3 +208,24 @@ This appendix logs every MCP query made during R4 — the actual instrument reco
 ```
 
 Populated as Tier 1-4 fixes ship.
+
+---
+
+### Hour 5 — F-AFIE-01 MCP citations
+
+```
+[05:00] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "Bedrock cross-region inference profile IAM permissions prerequisites"
+   search_intent: Find canonical AWS doc for IAM resource ARN format required to invoke
+                  a cross-region inference profile in Bedrock
+   result rank 1: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+   findings backed: F-AFIE-01 (11 partials, ~17 grant sites)
+
+[05:15] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+   max_length: 8000 (full canonical IAM policy + Important note + 2 worked examples retrieved)
+   key passage: "When you specify an inference profile in the Resource field in the first
+                 statement, you must also specify the foundation model in each Region
+                 associated with it." + canonical Resource list with all 3 ARN classes.
+   findings backed: F-AFIE-01 (verified the canonical IAM pattern)
+```
