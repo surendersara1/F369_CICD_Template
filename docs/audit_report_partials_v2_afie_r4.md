@@ -59,7 +59,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (§3.2 single-table + §7 Global Tables v2 use spec object; §10 non-negotiable #2 rewritten) ✓ | PASS |
 | 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors as new canonical default + §3.0a full CDK pattern + §2 decision tree restructured with switch-when criteria + AFIE F-FIN-08 + F-DATA-05 retros) ✓ | PASS |
 | 23 | ENTERPRISE_IDENTITY_CENTER | UNAUDITED (R11) | F-AFIE-21 (§6 gotcha codifies IDC-vs-Cognito split + cross-ref to AGENTCORE_IDENTITY §3.3 where the Cognito feature_plan=PLUS canonical now lives) ✓ | PASS |
-| 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard pattern library) | NEW/PASS |
+| 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard library — 17 canonical rules forward-referenced from all R4 Tier-1-4 fixes + helpers + CI wiring + 5 non-negotiables) ✓ | NEW/PASS |
 | 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (live-readonly pre-build audit) | NEW/PASS |
 | 26 | `OPS_AWS_SERVICE_CURRENCY_CHECK.md` | **NEW** | F-AFIE-24 (quarterly refresh runbook) | NEW/PASS |
 | 27 | `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` | **NEW** | F-AFIE-25 (model lifecycle dedicated partial) | NEW/PASS |
@@ -829,7 +829,51 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-22 through F-AFIE-25 — TBD (Tier 5+ as fixes land)
+### Finding F-AFIE-22 — STRUCTURAL (synth-guard rule library) — RESOLVED 2026-06-17
+**Partial authored:** `_assertions/cdk_synth_guards.md` (NEW)
+
+**Rationale (one of R4's 4 structural changes per `LESSONS_FROM_AFIE_2026-06.md`):** Defaults are not enough. R4 Tier-1-4 changed ~30 partial defaults to canonical-correct values, but every change is overridable by a consumer. The synth-guard library makes the high-stakes patterns **enforceable** — every rule fires at `cdk synth` time before any AWS API call.
+
+**Coverage — 17 canonical guards, one per F-AFIE finding class:**
+
+| # | Guard function | F-AFIE | What it catches |
+|---|---|---|---|
+| 1 | `assert_bedrock_invoke_three_arn_pattern` | F-AFIE-01 | IAM grants missing inference-profile/* or application-inference-profile/* ARNs |
+| 2 | `assert_no_wildcard_agentcore_grants_in_prod` | F-AFIE-09 | prod IAM with gateway/runtime/memory/* without aws:ResourceTag/Project |
+| 3 | `assert_permission_boundary_includes_agentcore_cross_project_deny` | F-AFIE-09 | Missing DenyAgentCoreInvokeAcrossProjects SID in boundary |
+| 4 | `assert_gateway_role_carries_project_tag_condition` | F-AFIE-12 | Gateway role lambda:InvokeFunction without tag condition |
+| 5 | `assert_alarm_treat_missing_data_set` | F-AFIE-07 | CW Alarm missing TreatMissingData (silent flap to INSUFFICIENT_DATA) |
+| 6 | `assert_sns_cmk_has_required_principals` | F-AFIE-05 | SNS Topic CMK missing cloudwatch+events+sns principals |
+| 7 | `assert_log_group_retention_floor` | F-AFIE-06 | prod LogGroup retention < 30d (180d finance/healthcare; 365d regulated/SOX) |
+| 8 | `assert_no_authorization_type_none` | F-AFIE-03 | API Method AuthorizationType=NONE (except whitelisted health) |
+| 9 | `assert_websocket_connect_route_has_authorizer` | F-AFIE-19 | WebSocket $connect route AuthorizationType=NONE |
+| 10 | `assert_cloudfront_resources_in_us_east_1` | F-AFIE-04 | CloudFront/WAF-CLOUDFRONT outside us-east-1 |
+| 11 | `assert_cloudfront_tls_path_single` | F-AFIE-04 | http-only CF origin + port-80 ALB redirect → 502 BadGw |
+| 12 | `assert_ddb_table_uses_pitr_specification` | F-AFIE-17 | DDB Table using deprecated PointInTimeRecoveryEnabled instead of spec object |
+| 13 | `assert_oss_network_policy_no_public_in_prod` | F-AFIE-10 | OSS NetworkPolicy AllowFromPublic=true in prod |
+| 14 | `assert_cedar_validation_mode_strict_in_prod` | F-AFIE-08 | Cedar CfnPolicy ValidationMode=IGNORE_ALL_FINDINGS in prod |
+| 15 | `assert_redshift_workgroup_max_capacity_set` | F-AFIE-14 | Redshift Workgroup MaxCapacity unset → unbounded auto-scale |
+| 16 | `assert_aurora_dev_min_capacity_is_zero` | F-AFIE-13 | Aurora dev/staging MinCapacity > 0 (misses scale-to-zero auto-pause) |
+| 17 | `assert_cognito_user_pool_uses_feature_plan` | F-AFIE-21 | Cognito UserPool on deprecated UserPoolAddOns.AdvancedSecurityMode |
+
+**Library structure:**
+- §1 Purpose — the "defaults aren't enough" rationale
+- §2 Decision — per-partial unit test vs composite CI gate
+- §3 The 17 canonical guards — each is a self-contained Python function with full implementation + remediation-pointer error message
+- §4 Helper utilities — `_listify`, `_flatten_resources`, `_statements`, `_condition_keys`, `_resolve_ref`, `_service_principals_with_kms_grants`
+- §5 Wiring — per-partial unit test pattern + composite CI gate pattern + GitHub Actions workflow
+- §6 Five non-negotiables (kit-level integration, compliance_class context, advisory-at-PR + blocking-at-merge, regression→guard-first, partial maintenance)
+- §7 References — back-pointer to every consuming partial
+
+**Why "STRUCTURAL" not "HIGH/MED":** This isn't fixing a partial — it's authoring a new enforcement layer. All 30+ "Recommended next steps: deferred to F-AFIE-22" forward-refs from Tier 1-4 now resolve to concrete rules in this partial.
+
+**MCP audit sources:** Used CDK Python API doc for `aws_cdk.assertions.Template` semantics (`find_resources`, `has_resource_properties`, `resource_count_is`). No new MCP doc-read required — every rule was derived from the AFIE-class retro + the canonical partial fix landed in Tier 1-4.
+
+**Self-reinforcement loop (the R5 pattern):** When the next AFIE-class regression surfaces, **author the guard BEFORE applying the partial fix**. This pre-stages the regression test and ensures the fix can be verified at synth time.
+
+---
+
+### Finding F-AFIE-23 through F-AFIE-25 — TBD (Tier 5+ as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
