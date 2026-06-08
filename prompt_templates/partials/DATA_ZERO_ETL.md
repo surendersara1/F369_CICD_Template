@@ -1,6 +1,7 @@
 # SOP — AWS Zero-ETL Integrations (Aurora/RDS/DynamoDB → Redshift; DynamoDB → OpenSearch; S3 → Redshift auto-copy)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-22 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-14):** Inline retro comment added to the `max_capacity=64` line — codifies that the existing cap is MANDATORY (not removable). AFIE F-FIN-05 retro applies (same partial class).
 **Applies to:** AWS CDK v2.238+ (Python 3.12+) · `aws_cdk.aws_rds` + `aws_cdk.aws_redshift` + `aws_cdk.aws_dynamodb` L1/L2 · Zero-ETL resources: `AWS::RDS::Integration`, `AWS::Redshift::Integration` (newer), `AWS::DynamoDB::GlobalTable` for DDB streams, Amazon OpenSearch Service + DDB zero-ETL · Aurora MySQL 3.05+ / Aurora Postgres 16.4+ / RDS MySQL 8.0.32+ / Redshift Serverless (minimum 8 RPU) · `aws_cdk.aws_redshiftserverless` for target workgroup
 
 ---
@@ -218,7 +219,7 @@ def _create_zero_etl_aurora_to_redshift(self, stage: str) -> None:
         workgroup_name=f"{{project_name}}-lh-wg-{stage}",
         namespace_name=self.rs_namespace.namespace_name,
         base_capacity=8,                     # 8 RPU is minimum for zero-ETL
-        max_capacity=64,
+        max_capacity=64,                     # F-AFIE-14: hard ceiling MANDATORY (F-FIN-05 retro)
         enhanced_vpc_routing=True,
         publicly_accessible=False,
         subnet_ids=[s.subnet_id for s in self.vpc.private_subnets],

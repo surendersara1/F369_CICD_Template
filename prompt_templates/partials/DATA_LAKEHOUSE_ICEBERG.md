@@ -1,6 +1,7 @@
 # SOP — Enterprise Data Lakehouse (S3 Iceberg · Athena v3 · Redshift Spectrum · Lake Formation)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-14):** Both `redshift.CfnWorkgroup` sites (Monolith + Micro-Stack) reinforced — `max_capacity` IS MANDATORY and prod ceiling lowered 512 → 256 RPU as a sensible-default starting point. Inline AFIE F-FIN-05 retro comments codify the rationale ($300+/hr burn during runaway MERGE).
 **Applies to:** AWS CDK v2 (Python 3.12+) · Apache Iceberg · Glue 4.0 · Athena engine version 3 · Redshift Serverless · Lake Formation
 
 ---
@@ -489,12 +490,15 @@ LIMIT 1000;
         tags=[{"key": "Project", "value": "{project_name}"}],
     )
 
+    # F-AFIE-14: max_capacity is MANDATORY — without it the workgroup auto-scales
+    # to 512 RPU with no ceiling. AFIE Sprint 10 F-FIN-05 retro: $300+/hr burn.
+    # Values below are starting points; per-engagement tuning expected.
     redshift_workgroup = redshift.CfnWorkgroup(
         self, "RedshiftWorkgroup",
         workgroup_name=f"{{project_name}}-{stage_name}",
         namespace_name=redshift_namespace.ref,
-        base_capacity=8 if not IS_PROD else 32,   # RPUs — 8 min, autoscales to 512
-        max_capacity=64 if not IS_PROD else 512,
+        base_capacity=8 if not IS_PROD else 32,   # RPUs — 8 min, autoscales to max_capacity
+        max_capacity=64 if not IS_PROD else 256,  # F-AFIE-14: hard ceiling (was 512)
         enhanced_vpc_routing=True,             # All traffic stays within VPC
         publicly_accessible=False,
         subnet_ids=[s.subnet_id for s in self.vpc.isolated_subnets[:2]],
@@ -1216,11 +1220,13 @@ class LakehouseStack(cdk.Stack):
             iam_roles=[redshift_spectrum_role_arn],
             log_exports=["userlog", "connectionlog", "useractivitylog"],
         )
+        # F-AFIE-14: max_capacity is MANDATORY (AFIE F-FIN-05 retro — $300+/hr burn).
+        # Values below are starting points; per-engagement tuning expected.
         redshift_workgroup = redshift.CfnWorkgroup(self, "RedshiftWorkgroup",
             workgroup_name=f"{{project_name}}-{stage_name}",
             namespace_name=redshift_namespace.ref,
             base_capacity=8 if not IS_PROD else 32,
-            max_capacity=64 if not IS_PROD else 512,
+            max_capacity=64 if not IS_PROD else 256,    # F-AFIE-14: hard ceiling (was 512)
             enhanced_vpc_routing=True,
             publicly_accessible=False,
             subnet_ids=[s.subnet_id for s in vpc.isolated_subnets[:2]],

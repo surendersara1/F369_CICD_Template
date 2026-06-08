@@ -51,7 +51,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (§3.3 NEW post-deploy verify_security_baseline.py covering all 6 detective controls + §6 non-negotiable #6) ✓ | PASS |
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (tag-condition added to lambda:InvokeFunction + policy-engine/* + gateway/* grants in §3 + §4; gotcha codified) ✓ | PASS |
 | 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (min_capacity dev default 0.5→0; serverless_v2_auto_pause_duration=300s; prod retains 0.5 for cold-start; both §3 + §4) ✓ | PASS |
-| 16 | DATA_DBT_REDSHIFT_SERVERLESS (or new) | TBD | F-AFIE-14 (4 RPU base) | TBD |
+| 16 | DATA_DBT_REDSHIFT_SERVERLESS + MLOPS_DATA_PLATFORM + DATA_LAKEHOUSE_ICEBERG + DATA_ZERO_ETL | TBD | F-AFIE-14 (max_capacity MANDATORY across all 4 partials creating CfnWorkgroup; dbt partial gains pitfall row; prod cap lowered 512→256 starting point) ✓ | PASS |
 | 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (Fargate Spot for dev) | TBD |
 | 18 | LAYER_BACKEND_ECS | PASS (R1) | F-AFIE-15 (Spot pattern cross-ref) | TBD |
 | 19 | LAYER_NETWORKING | PASS (R1) | F-AFIE-16 (interface endpoints over NAT) | TBD |
@@ -546,7 +546,40 @@ The function-name prefix is a *naming convention* not a *security boundary*. A t
 
 ---
 
-### Finding F-AFIE-14 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-14 — MED (Redshift Serverless max_capacity MANDATORY) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `MLOPS_DATA_PLATFORM.md` §3 + `DATA_LAKEHOUSE_ICEBERG.md` §3 + §4 + `DATA_ZERO_ETL.md` §3 + `DATA_DBT_REDSHIFT_SERVERLESS.md` §14
+
+**Issue (from AFIE Sprint 10 F-FIN-05 MED):** ms-09 deployed a Redshift Serverless workgroup for the dbt Gold layer without setting `max_capacity` (the CFN `MaxCapacity` property is optional and defaults to unlimited / 512 RPU auto-scale). A runaway dbt MERGE in staging during data backfill auto-scaled the workgroup to 512 RPU and burned $300+ in an hour before someone killed it. The canonical `MLOPS_DATA_PLATFORM.md` partial set `base_capacity` but never set `max_capacity` — leaving the consumer no cost ceiling.
+
+**Note on original framing:** R4 plan originally framed this finding as "lower base_capacity floor to 4 RPU". MCP audit determined the canonical minimum is still 8 RPU (CFN `BaseCapacity: Integer` doesn't specify a sub-8 floor; AWS Console UI floor is 8). Reframing to focus on the actual cost-blowup root cause: `max_capacity` was unset.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshiftserverless-workgroup.html (start_index 1500 + 3500) — confirms `BaseCapacity` and `MaxCapacity` are both optional Integer properties; without MaxCapacity the workgroup auto-scales without ceiling.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-billing.html — confirms on-demand RPU billing model + cost-control responsibility on the customer.
+
+**Fix applied:**
+
+1. **`MLOPS_DATA_PLATFORM.md` §3** — added `max_capacity=64 if stage_name == "staging" else 256` to `redshift.CfnWorkgroup(...)`. Inline AFIE F-FIN-05 retro comment + AWS doc URL.
+
+2. **`DATA_LAKEHOUSE_ICEBERG.md` §3 + §4** — both `redshift.CfnWorkgroup` sites already had `max_capacity` set, but the prod cap was 512 RPU (the max allowed). Lowered to 256 as a sensible starting point + inline F-AFIE-14 retro comment.
+
+3. **`DATA_ZERO_ETL.md` §3** — `max_capacity=64` was already present; added inline retro comment codifying it is MANDATORY (not removable).
+
+4. **`DATA_DBT_REDSHIFT_SERVERLESS.md` §14 Pitfalls** — new pitfall row codifying that the upstream workgroup partials this composite consumes MUST set `max_capacity` explicitly.
+
+**Headers bumped:** all 4 partials → 2.1 (DATA_DBT_REDSHIFT_SERVERLESS → 1.1, since it was at 1.0).
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_redshift_workgroup_max_capacity_set` — fails synth if any `AWS::RedshiftServerless::Workgroup` resource lacks `MaxCapacity`.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-billing.html (read 2026-06-17)
+- https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshiftserverless-workgroup.html (read 2026-06-17)
+
+**grep -r sweep (deferred to Tier 8):** scan for `CfnWorkgroup` without `max_capacity` parameter; flag for ceiling enforcement.
+
+---
+
+### Finding F-AFIE-15 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
