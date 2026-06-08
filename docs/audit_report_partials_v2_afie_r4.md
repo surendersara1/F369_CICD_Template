@@ -61,7 +61,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 23 | ENTERPRISE_IDENTITY_CENTER | UNAUDITED (R11) | F-AFIE-21 (§6 gotcha codifies IDC-vs-Cognito split + cross-ref to AGENTCORE_IDENTITY §3.3 where the Cognito feature_plan=PLUS canonical now lives) ✓ | PASS |
 | 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard library — 17 canonical rules forward-referenced from all R4 Tier-1-4 fixes + helpers + CI wiring + 5 non-negotiables) ✓ | NEW/PASS |
 | 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (pre-deploy MCP audit + post-deploy boto3 audit, generalizing F-AFIE-11 across detective controls + cost-shape + partial currency + canonical-partial drift; CI workflow + MCP-transport helper) ✓ | NEW/PASS |
-| 26 | `OPS_AWS_SERVICE_CURRENCY_CHECK.md` | **NEW** | F-AFIE-24 (quarterly refresh runbook) | NEW/PASS |
+| 26 | `OPS_AWS_SERVICE_CURRENCY_CHECK.md` | **NEW** | F-AFIE-24 (quarterly cadence for 7 partial families + monthly cadence for Bedrock lifecycle + cron-driven CI workflow + auto-issue-on-drift + SOC2-archived output) ✓ | NEW/PASS |
 | 27 | `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` | **NEW** | F-AFIE-25 (model lifecycle dedicated partial) | NEW/PASS |
 
 ---
@@ -900,7 +900,39 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-24 + F-AFIE-25 — TBD (remainder of Tier 5)
+### Finding F-AFIE-24 — STRUCTURAL (quarterly currency-check runbook) — RESOLVED 2026-06-17
+**Partial authored:** `OPS_AWS_SERVICE_CURRENCY_CHECK.md` (NEW)
+
+**Rationale (1 of 4 R4 structural changes per `LESSONS_FROM_AFIE_2026-06.md`):** Closes Class A — "2024 snapshot drift". R4 Tier-1-4 found ~12 partials with 2024-era defaults that had become deprecated/wrong by mid-2026. Without an ongoing maintenance ritual, this drift will re-accumulate. F-AFIE-24 makes the upkeep mandatory and observable.
+
+**Coverage — 7 partial families on quarterly cadence + Bedrock on monthly cadence:**
+
+| Family | Cadence | What the check fetches via MCP | What it catches |
+|---|---|---|---|
+| Bedrock (LLMOPS_BEDROCK, BEDROCK_*, model lifecycle) | Monthly (lifecycle) + Quarterly (pricing/CDK) | model-lifecycle.html + CDK Python API + CFN template ref | Active → Legacy transitions, pricing drift, new spec props |
+| Cognito (AGENTCORE_IDENTITY §3.3, SERVERLESS_HTTP_API_COGNITO) | Quarterly | cognito-sign-in-feature-plans.html + threat-protection doc + CDK UserPool | Tier-structure changes, deprecated props |
+| RDS/Aurora (DATA_AURORA_SERVERLESS_V2) | Quarterly | aurora-serverless-v2-auto-pause.html + CDK DatabaseCluster | Prop name drift (`_seconds` vs `_duration`), engine-version compatibility |
+| DynamoDB (LAYER_DATA, SERVERLESS_DYNAMODB_PATTERNS) | Quarterly | CDK Table + TableV2 | Deprecated bool→spec props, TableV2 migration |
+| OpenSearch (DATA_OPENSEARCH_SERVERLESS, BEDROCK_KNOWLEDGE_BASES) | Quarterly | s3-vectors-bedrock-kb.html + serverless-network.html | S3 Vectors limitation changes, network-policy prop changes |
+| Networking (LAYER_NETWORKING, CDN_CLOUDFRONT_FOUNDATION) | Quarterly | PrivateLink support catalog + CloudFront HTTPS requirements + WAF CloudFront features | New interface endpoints, us-east-1 mandates |
+| Cedar (AGENTCORE_AGENT_CONTROL) | Quarterly | Cedar spec (plain HTTPS, non-MCP) + AgentCore policies doc | Undefined-attribute semantic changes, validation_mode enum changes |
+| Synth-guards | Quarterly | Itself (the F-AFIE-22 partial) | Adding/removing rules in lockstep with partial fixes |
+
+**Structural sections:**
+- §1 Purpose — Class A rationale + 6 specific drift examples from R4
+- §2 Decision — family ownership table (Bedrock-stack lead / Identity-stack lead / Data-stack lead / Networking-stack lead / Security-stack lead / R4-audit-round lead)
+- §3 Generic 5-step pattern — read Last-reviewed → MCP doc fetch → CDK API fetch → CFN template ref → update partial OR open audit round
+- §4-10 — Per-family checklists with copy-pasteable MCP read_documentation calls
+- §11 — CI cron workflow + auto-issue-on-drift via gh-actions
+- §12 — Five non-negotiables (monthly NOT quarterly for Bedrock lifecycle; drift-detection ≠ drift-fix; no silent Last-reviewed bumps; synth-guards lockstep; SOC2-archived output)
+
+**Why "STRUCTURAL" not "HIGH/MED":** This isn't fixing a partial — it's authoring the upkeep ritual. Every future audit round (R5 onwards) consumes this runbook.
+
+**MCP audit sources:** No new MCP doc-read required — this partial codifies *how* to run MCP audits, not a finding from one.
+
+---
+
+### Finding F-AFIE-25 — TBD (remainder of Tier 5)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
