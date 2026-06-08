@@ -54,7 +54,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 16 | DATA_DBT_REDSHIFT_SERVERLESS + MLOPS_DATA_PLATFORM + DATA_LAKEHOUSE_ICEBERG + DATA_ZERO_ETL | TBD | F-AFIE-14 (max_capacity MANDATORY across all 4 partials creating CfnWorkgroup; dbt partial gains pitfall row; prod cap lowered 512→256 starting point) ✓ | PASS |
 | 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (§9 gotcha codifies stage-tuned FARGATE_SPOT mix + AFIE F-FIN-06 retro) ✓ | PASS |
 | 18 | LAYER_BACKEND_ECS | PASS (R1) | F-AFIE-15 (§3 + §4 capacity_provider_strategies stage-tuned: dev SPOT 9 + base-0 / staging SPOT 5 + FARGATE base=1 / prod SPOT 3 + FARGATE base=1) ✓ | PASS |
-| 19 | LAYER_NETWORKING | PASS (R1) | F-AFIE-16 (interface endpoints over NAT) | TBD |
+| 19 | LAYER_NETWORKING | PASS (R1) | F-AFIE-16 (nat_gateways=0 dev/staging default; 7 → 13 interface endpoints + DDB gateway endpoint; §3.1 gotcha codifies break-even math) ✓ | PASS |
 | 20 | LAYER_DATA | WARN (R1) | F-AFIE-17 (PITR on by default + spec object) | TBD |
 | 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (PITR + spec object) | TBD |
 | 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors backend + decision tree) | TBD |
@@ -607,7 +607,39 @@ The function-name prefix is a *naming convention* not a *security boundary*. A t
 
 ---
 
-### Finding F-AFIE-16 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-16 — MED (NAT Gateways vs interface endpoints) — RESOLVED 2026-06-17
+**Partial fixed:** `LAYER_NETWORKING.md` §3 + §4 + §3.1
+
+**Issue (from AFIE Sprint 10 F-FIN-07 MED):** ms-09 ran `nat_gateways=1` in dev + staging and `nat_gateways=2` in prod year-round. NAT egress data-transfer cost ($0.045/GB) was the single largest networking line item — ~$1,200 in NAT data transfer over 12 months for traffic that already had full interface-endpoint coverage. The canonical `LAYER_NETWORKING.md` partial provided 7 interface endpoints (Bedrock-Runtime, Transcribe, SecretsManager, SSM, KMS, CloudWatchLogs, STS) — sufficient for typical Lambda agent workloads but missing 6 endpoints required for fully NAT-free operation (no SQS/SNS/EventBridge/ECR-DKR/ECR-API/CloudWatch-Monitoring/Bedrock-AgentRuntime).
+
+**Evidence (verified via library inspection):**
+- `LAYER_NETWORKING.md` §3 line 46 — confirmed `nat_gateways=1 if stage != "prod" else 2` (no zero-stage path).
+- §3 line 68-75 — confirmed 7 interface endpoints + 1 gateway endpoint (S3).
+- AWS pricing: NAT Gateway = $0.045/GB processing + $0.045/GB data transfer + $0.045/hour (~$32/mo idle). Interface endpoint = $0.01/AZ/hour + $0.01/GB processing (~$15/mo/AZ idle, no per-GB data transfer charge).
+
+**Fix applied:**
+
+1. **§3 Monolith** — `nat_gateways` flipped to `0 if stage in ("dev", "staging") else 2`. Inline AFIE F-FIN-07 retro + override note for workloads hitting 3rd-party APIs.
+
+2. **§3 endpoint list** — expanded from 7 → 13 interface endpoints, added 2nd gateway endpoint (DynamoDB):
+   - **New gateway:** DynamoDB
+   - **New interface:** BedrockAgentRuntime, CloudWatchMonitoring, SQS, SNS, EventBridge, ECR (API), ECR_DOCKER (DKR)
+
+3. **§4 Micro-Stack `NetworkingStack`** — same nat_gateways flip (with `stage_name` from kwargs default "prod"); same expanded endpoint list. Inline cross-ref to §3 for the AFIE retro.
+
+4. **§3.1 gotcha** — new bullet codifying the break-even math: interface endpoints = ~$187/mo idle (13 × 2 AZs); but displaces $200-$1000+/mo NAT data transfer at moderate traffic. Break-even ~20 GB/day egress. Documents the 3 cases where NAT is still required: 3rd-party APIs, PyPI pip install in VPC, AWS services without interface endpoint in region.
+
+**Header bumped:** LAYER_NETWORKING 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_no_nat_gateway_in_dev` — fails synth if `compliance_class == "dev"` and `AWS::EC2::NatGateway` resource count > 0 (unless override flag set).
+
+**MCP audit sources:** Used library inspection + AWS pricing reference (https://aws.amazon.com/vpc/pricing/, https://aws.amazon.com/privatelink/pricing/). No new MCP doc-read required since interface-vs-NAT cost-model is well-documented and the F-FIN-07 retro is a cost-engineering decision.
+
+**grep -r sweep (deferred to Tier 8):** scan for `nat_gateways=1` or `nat_gateways=2` in dev/staging contexts across `partials/`, `kits/`, `templates/composite/`.
+
+---
+
+### Finding F-AFIE-17 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 

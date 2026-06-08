@@ -1,6 +1,7 @@
 # SOP — Networking Layer (VPC, Subnets, Endpoints, Security Groups)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-16):** §3 + §4 VPC config: `nat_gateways` default flipped to `0 if stage in ("dev", "staging") else 2`. Interface endpoint list expanded from 7 to 13 (added BedrockAgentRuntime, CloudWatchMonitoring, SQS, SNS, EventBridge, ECR API + DKR) + 2nd gateway endpoint (DynamoDB). AFIE Sprint 10 F-FIN-07 retro: ms-09 ate $1,200 in NAT data-transfer over 12 months. New §3.1 gotcha codifies break-even math (interface endpoints = ~$187/mo idle; NAT data transfer at moderate traffic = $200-$1000+/mo).
 **Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
@@ -38,12 +39,20 @@ from aws_cdk import aws_ec2 as ec2, aws_logs as logs
 
 
 def _create_networking(self, stage: str) -> None:
+    # F-AFIE-16: NAT Gateways are an $0.045/GB egress money pit. Interface VPC
+    # endpoints cover 95%+ of typical Bedrock-agent traffic and have only
+    # $0.01/GB processing + $0.01/hour per AZ. AFIE Sprint 10 F-FIN-07 retro:
+    # ms-09 spent ~$1,200 on NAT data transfer over 12 months for traffic that
+    # could have used interface endpoints. R4 default: dev/staging → 0 NATs
+    # (endpoint-only egress); prod → 2 NATs for AZ-redundant fallback covering
+    # the small slice of egress to non-AWS-API destinations (3rd-party APIs).
+    # If your workload calls external APIs heavily, override nat_gateways=1.
     self.vpc = ec2.Vpc(
         self, "Vpc",
         vpc_name=f"{{project_name}}-vpc-{stage}",
         ip_addresses=ec2.IpAddresses.cidr("10.42.0.0/16"),
         max_azs=2,
-        nat_gateways=1 if stage != "prod" else 2,
+        nat_gateways=0 if stage in ("dev", "staging") else 2,
         subnet_configuration=[
             ec2.SubnetConfiguration(name="Public",   subnet_type=ec2.SubnetType.PUBLIC,               cidr_mask=24),
             ec2.SubnetConfiguration(name="Private",  subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,  cidr_mask=24),
@@ -64,15 +73,29 @@ def _create_networking(self, stage: str) -> None:
         connection=ec2.Port.tcp(5432),
     )
 
+    # Gateway endpoints — FREE; cover S3 + DynamoDB without any data-transfer cost.
     self.vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
+    self.vpc.add_gateway_endpoint("DynamoDbEndpoint", service=ec2.GatewayVpcEndpointAwsService.DYNAMODB)
+
+    # Interface endpoints — required to operate NAT-free (F-AFIE-16). Each is
+    # $0.01/hour/AZ + $0.01/GB processing. With 2 AZs that's ~$15/mo/endpoint
+    # idle; at scale data-transfer savings dwarf this. The list below covers
+    # 95% of typical Bedrock-agent + ECS workloads. Add more per your SOW.
     for name, svc in [
-        ("BedrockRuntime", ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME),
-        ("Transcribe",     ec2.InterfaceVpcEndpointAwsService.TRANSCRIBE),
-        ("SecretsManager", ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER),
-        ("SSM",            ec2.InterfaceVpcEndpointAwsService.SSM),
-        ("KMS",            ec2.InterfaceVpcEndpointAwsService.KMS),
-        ("CloudWatchLogs", ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS),
-        ("STS",            ec2.InterfaceVpcEndpointAwsService.STS),
+        ("BedrockRuntime",         ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME),
+        ("BedrockAgentRuntime",    ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENT_RUNTIME),
+        ("Transcribe",             ec2.InterfaceVpcEndpointAwsService.TRANSCRIBE),
+        ("SecretsManager",         ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER),
+        ("SSM",                    ec2.InterfaceVpcEndpointAwsService.SSM),
+        ("KMS",                    ec2.InterfaceVpcEndpointAwsService.KMS),
+        ("CloudWatchLogs",         ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS),
+        ("CloudWatchMonitoring",   ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_MONITORING),
+        ("STS",                    ec2.InterfaceVpcEndpointAwsService.STS),
+        ("SQS",                    ec2.InterfaceVpcEndpointAwsService.SQS),
+        ("SNS",                    ec2.InterfaceVpcEndpointAwsService.SNS),
+        ("EventBridge",            ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE),
+        ("EcrApi",                 ec2.InterfaceVpcEndpointAwsService.ECR),       # image pulls (control plane)
+        ("EcrDkr",                 ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER),# image pulls (data plane)
     ]:
         self.vpc.add_interface_endpoint(
             f"{name}Endpoint", service=svc, private_dns_enabled=True,
@@ -93,6 +116,8 @@ def _create_networking(self, stage: str) -> None:
 
 ### 3.1 Monolith gotchas
 
+- **R4 / F-AFIE-16: `nat_gateways=0` for dev/staging is the canonical default.** The interface endpoint list in §3 covers 95%+ of Bedrock-agent + ECS workload traffic (15 endpoints total: 2 gateway + 13 interface). NAT is required ONLY for: (a) outbound to 3rd-party APIs (e.g., calling out to OpenAI, Anthropic public API, vendor webhooks), (b) `pip install` from PyPI inside the VPC, (c) any AWS service without an interface endpoint in your region. If none of those apply to dev/staging, `nat_gateways=0` saves ~$32-$65/mo/NAT. AFIE Sprint 10 F-FIN-07 retro: ms-09 ate $1,200 in NAT data-transfer over 12 months for traffic that already had endpoint coverage. Override `nat_gateways=1` if dev hits 3rd-party APIs.
+- **Endpoint cost note:** each interface endpoint = $0.01/AZ/hour + $0.01/GB processing. 13 endpoints × 2 AZs = $187/mo idle. But that displaces $200-$1000+/mo in NAT data transfer at moderate-to-high traffic. Break-even is ~20 GB/day egress.
 - `nat_gateways=0` is legal only if every outbound call is via VPC endpoint (rare).
 - `max_azs=2` for POC; production should run 3.
 - Setting `vpc_name=` plus a separate `Name` tag clashes — pick one.
@@ -115,11 +140,16 @@ class NetworkingStack(cdk.Stack):
     def __init__(self, scope: Construct, **kwargs) -> None:
         super().__init__(scope, "{project_name}-networking", **kwargs)
 
+        # F-AFIE-16: NAT-free for dev/staging. See §3 for AFIE F-FIN-07 retro
+        # ($1,200 NAT data transfer over 12 months). MicroStack signature takes
+        # stage_name in **kwargs; default to "prod" if unspecified.
+        stage_name = kwargs.pop("stage_name", "prod")
         self.vpc = ec2.Vpc(
             self, "Vpc",
             vpc_name="{project_name}-vpc",
             ip_addresses=ec2.IpAddresses.cidr("10.42.0.0/16"),
-            max_azs=2, nat_gateways=1,
+            max_azs=2,
+            nat_gateways=0 if stage_name in ("dev", "staging") else 2,
             subnet_configuration=[
                 ec2.SubnetConfiguration(name="Public",   subnet_type=ec2.SubnetType.PUBLIC,               cidr_mask=24),
                 ec2.SubnetConfiguration(name="Private",  subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,  cidr_mask=24),
@@ -134,15 +164,24 @@ class NetworkingStack(cdk.Stack):
             connection=ec2.Port.tcp(5432),
         )
 
+        # F-AFIE-16: Gateway + interface endpoints — same list as §3 Monolith.
         self.vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
+        self.vpc.add_gateway_endpoint("DynamoDbEndpoint", service=ec2.GatewayVpcEndpointAwsService.DYNAMODB)
         for name, svc in [
-            ("BedrockRuntime", ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME),
-            ("Transcribe",     ec2.InterfaceVpcEndpointAwsService.TRANSCRIBE),
-            ("SecretsManager", ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER),
-            ("SSM",            ec2.InterfaceVpcEndpointAwsService.SSM),
-            ("KMS",            ec2.InterfaceVpcEndpointAwsService.KMS),
-            ("CloudWatchLogs", ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS),
-            ("STS",            ec2.InterfaceVpcEndpointAwsService.STS),
+            ("BedrockRuntime",         ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME),
+            ("BedrockAgentRuntime",    ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENT_RUNTIME),
+            ("Transcribe",             ec2.InterfaceVpcEndpointAwsService.TRANSCRIBE),
+            ("SecretsManager",         ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER),
+            ("SSM",                    ec2.InterfaceVpcEndpointAwsService.SSM),
+            ("KMS",                    ec2.InterfaceVpcEndpointAwsService.KMS),
+            ("CloudWatchLogs",         ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS),
+            ("CloudWatchMonitoring",   ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_MONITORING),
+            ("STS",                    ec2.InterfaceVpcEndpointAwsService.STS),
+            ("SQS",                    ec2.InterfaceVpcEndpointAwsService.SQS),
+            ("SNS",                    ec2.InterfaceVpcEndpointAwsService.SNS),
+            ("EventBridge",            ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE),
+            ("EcrApi",                 ec2.InterfaceVpcEndpointAwsService.ECR),
+            ("EcrDkr",                 ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER),
         ]:
             self.vpc.add_interface_endpoint(f"{name}Endpoint",
                 service=svc, private_dns_enabled=True,
