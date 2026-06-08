@@ -55,8 +55,8 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (§9 gotcha codifies stage-tuned FARGATE_SPOT mix + AFIE F-FIN-06 retro) ✓ | PASS |
 | 18 | LAYER_BACKEND_ECS | PASS (R1) | F-AFIE-15 (§3 + §4 capacity_provider_strategies stage-tuned: dev SPOT 9 + base-0 / staging SPOT 5 + FARGATE base=1 / prod SPOT 3 + FARGATE base=1) ✓ | PASS |
 | 19 | LAYER_NETWORKING | PASS (R1) | F-AFIE-16 (nat_gateways=0 dev/staging default; 7 → 13 interface endpoints + DDB gateway endpoint; §3.1 gotcha codifies break-even math) ✓ | PASS |
-| 20 | LAYER_DATA | WARN (R1) | F-AFIE-17 (PITR on by default + spec object) | TBD |
-| 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (PITR + spec object) | TBD |
+| 20 | LAYER_DATA | WARN (R1) | F-AFIE-17 (deprecated `point_in_time_recovery=bool` → new `point_in_time_recovery_specification` spec object; compliance-class recovery_period_in_days; PITR ON for ALL stages; audit-log full 35-day + deletion_protection) ✓ | PASS |
+| 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (§3.2 single-table + §7 Global Tables v2 use spec object; §10 non-negotiable #2 rewritten) ✓ | PASS |
 | 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors backend + decision tree) | TBD |
 | 23 | ENTERPRISE_IDENTITY_CENTER (or new) | UNAUDITED (R11) | F-AFIE-21 (Cognito Plus plan + advanced security) | TBD |
 | 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard pattern library) | NEW/PASS |
@@ -639,7 +639,45 @@ The function-name prefix is a *naming convention* not a *security boundary*. A t
 
 ---
 
-### Finding F-AFIE-17 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-17 — MED (DDB PITR on by default + new spec object) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `LAYER_DATA.md` §3.3 + §4.3 + `SERVERLESS_DYNAMODB_PATTERNS.md` §3.2 + §7 + §10
+
+**Issue (from AFIE Sprint 10 F-DATA-04 MED):** ms-09 dev jobs_ledger was corrupted by a bad migration script. PITR was off because the canonical partial gated it as `point_in_time_recovery=(stage == "prod")`. Recovery required 4 hours of engineering time + manual backfill from CW Logs application events. Cost of PITR storage: $0.20/GB/mo. Cost of NOT having PITR: half an engineer-day, every recurrence.
+
+Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as of 2025 CDK; the new canonical is `point_in_time_recovery_specification: PointInTimeRecoverySpecification` with explicit `recovery_period_in_days` (1-35). The partials still used the deprecated bool prop.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__search_documentation` → https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html confirms `point_in_time_recovery: Optional[bool]` is **deprecated**; `point_in_time_recovery_specification: PointInTimeRecoverySpecification` is the new canonical.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_dynamodb.CfnTable.PointInTimeRecoverySpecificationProperty.html confirms `recoveryPeriodInDays: Integer` range (1-35); default 35 days.
+
+**Fix applied:**
+
+1. **`LAYER_DATA.md` §3.3 Monolith jobs_ledger** — replaced `point_in_time_recovery=(stage == "prod")` with `point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(...)` + `_PITR_DAYS_BY_CLASS` table (7 dev / 14 staging / 35 prod-*). Inline AFIE F-DATA-04 retro + CDK prop verification note. Added paired `deletion_protection=(stage == "prod")`.
+
+2. **`LAYER_DATA.md` §3.3 Monolith audit_log** — replaced `point_in_time_recovery=True` (already on) with full spec object at fixed 35 days + `deletion_protection=True` (audit data always protected).
+
+3. **`LAYER_DATA.md` §4.3 Micro-Stack JobLedgerStack** — replaced `point_in_time_recovery=False, # POC; True in prod` with the same compliance-class-driven spec object.
+
+4. **`SERVERLESS_DYNAMODB_PATTERNS.md` §3.2 single-table** — replaced `point_in_time_recovery=True` with full spec object + compliance-class-driven recovery period.
+
+5. **`SERVERLESS_DYNAMODB_PATTERNS.md` §7 Global Tables v2** — replaced bool prop with spec object at fixed 35 days (global tables always full window).
+
+6. **`SERVERLESS_DYNAMODB_PATTERNS.md` §10 non-negotiable #2** — rewritten: "PITR on ALL tables, not just prod; use new spec object; compliance-class drives recovery period; `point_in_time_recovery=bool` is deprecated."
+
+**Headers bumped:** LAYER_DATA 2.0 → 2.1; SERVERLESS_DYNAMODB_PATTERNS 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_ddb_table_uses_pitr_specification` — fails synth if any `AWS::DynamoDB::Table` uses the deprecated bool `PointInTimeRecoveryEnabled` at the top level rather than `PointInTimeRecoverySpecification` nested object.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html (start_index 5500 — confirmed deprecated bool + new spec prop)
+- https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_dynamodb.CfnTable.PointInTimeRecoverySpecificationProperty.html (full schema)
+- https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/PointInTimeRecovery_Howitworks.html (1-35 day recovery window)
+
+**grep -r sweep (deferred to Tier 8):** scan for any `point_in_time_recovery=` (bool prop) in `partials/`, `kits/`, `templates/composite/`; migrate to spec object.
+
+---
+
+### Finding F-AFIE-18 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
@@ -878,4 +916,59 @@ Populated as Tier 1-4 fixes ship.
        — smallest value 0 for engine versions that support Aurora Serverless v2 auto-pause
        — Default: 0.5
    findings backed: F-AFIE-13 (verified Python prop names before writing CDK code)
+```
+
+---
+
+### Hour 24 — F-AFIE-14 + F-AFIE-17 MCP citations
+
+```
+[24:00] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "Redshift Serverless workgroup minimum base capacity 8 RPU dev billing"
+   search_intent: Confirm minimum BaseCapacity for Redshift Serverless workgroup
+   result rank 4: https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-workgroup-max-rpu.html
+   findings backed: F-AFIE-14 (informed reframe — 4 RPU floor unsupported;
+                    pivoted to max_capacity mandate)
+
+[24:15] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-billing.html
+   max_length: 4000
+   key passage: on-demand RPU billing model + customer-controlled cost limits
+   findings backed: F-AFIE-14 (max_capacity is the customer's cost-control lever)
+
+[24:30] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshiftserverless-workgroup.html
+   max_length: 2000 + 4000 (start_index 1500 + 3500)
+   key passage (start_index 1500): BaseCapacity / MaxCapacity both optional
+                                    Integer; no documented sub-8 minimum.
+   key passage (start_index 3500): MaxCapacity = "The maximum data-warehouse
+                                    capacity Amazon Redshift Serverless uses to
+                                    serve queries" — unset means unlimited.
+   findings backed: F-AFIE-14 (confirmed MaxCapacity unset → unbounded auto-scale)
+
+[24:45] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "DynamoDB CDK point_in_time_recovery_specification recovery_period_in_days
+           CfnTable"
+   search_intent: Find canonical CDK prop name for new PITR retention spec
+   result rank 3: https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_dynamodb.CfnTable.PointInTimeRecoverySpecificationProperty.html
+   findings backed: F-AFIE-17 (verified new prop name + retention range 1-35)
+
+[24:50] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_dynamodb.CfnTable.PointInTimeRecoverySpecificationProperty.html
+   max_length: 3000
+   key passage:
+     PointInTimeRecoverySpecificationProperty {
+       pointInTimeRecoveryEnabled?: boolean,
+       recoveryPeriodInDays?: number  // 1-35
+     }
+   findings backed: F-AFIE-17 (canonical L1 nested property structure)
+
+[24:55] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html
+   max_length: 2500 (start_index 5500 retrieved)
+   key passage (start_index 5500):
+     point_in_time_recovery: Optional[bool] — (deprecated)
+     point_in_time_recovery_specification: PointInTimeRecoverySpecification
+       — new canonical, supports recovery_period_in_days
+   findings backed: F-AFIE-17 (confirmed deprecation + new canonical Python prop)
 ```

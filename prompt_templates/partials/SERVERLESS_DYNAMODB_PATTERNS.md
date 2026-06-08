@@ -1,6 +1,7 @@
 # SOP — DynamoDB Production Patterns (single-table design · GSI · transactions · streams · TTL · DAX · auto-scaling · backup)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-17):** §3.2 single-table + §7 Global Tables v2 migrated to the new `point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(...)` (bool prop deprecated). Compliance-class table drives `recovery_period_in_days` (dev 7 / staging 14 / prod 35; global tables always 35). §10 non-negotiable #2 rewritten to apply across ALL stages, not just prod. CDK prop verified live.
 **Applies to:** AWS CDK v2 (Python 3.12+) · DynamoDB on-demand + provisioned · Single-table design · GSI / LSI · TransactWrite / TransactGet · Streams (NEW_AND_OLD_IMAGES) · TTL · DAX · Point-in-Time Recovery · AWS Backup · Global Tables v2
 
 ---
@@ -93,6 +94,14 @@ class DataStack(Stack):
                  kms_key: kms.IKey, **kwargs):
         super().__init__(scope, id, **kwargs)
 
+        # F-AFIE-17: PITR via the new spec object (point_in_time_recovery=bool is
+        # deprecated as of 2025). compliance_class drives the recovery window.
+        # AFIE Sprint 10 F-DATA-04: dev table corrupted by bad migration;
+        # PITR was off; 4 hours engineering to restore manually.
+        _PITR_DAYS_BY_CLASS = {"dev": 7, "staging": 14}
+        _pitr_days = _PITR_DAYS_BY_CLASS.get(
+            self.node.try_get_context("compliance_class") or env_name, 35,
+        )
         self.table = ddb.Table(self, "AppTable",
             table_name=f"{env_name}-app",
             partition_key=ddb.Attribute(name="pk", type=ddb.AttributeType.STRING),
@@ -100,7 +109,10 @@ class DataStack(Stack):
             billing_mode=ddb.BillingMode.PAY_PER_REQUEST,           # on-demand
             encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
             encryption_key=kms_key,
-            point_in_time_recovery=True,
+            point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+                recovery_period_in_days=_pitr_days,
+            ),
             time_to_live_attribute="ttl",
             stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,           # CDC
             removal_policy=RemovalPolicy.RETAIN if env_name == "prod" else RemovalPolicy.DESTROY,
@@ -317,7 +329,11 @@ self.table = ddb.Table(self, "GlobalAppTable",
     billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
     encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
     encryption_key=kms_key,                  # MUST be multi-region key for global table
-    point_in_time_recovery=True,
+    # F-AFIE-17: use the new PITR spec object; global tables always get full 35-day window.
+    point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+        point_in_time_recovery_enabled=True,
+        recovery_period_in_days=35,
+    ),
     stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
     replication_regions=["us-west-2", "eu-west-1"],   # creates global table v2
 )
@@ -406,7 +422,7 @@ def test_idempotent_insert_blocks_duplicate(ddb_table):
 ## 10. Five non-negotiables
 
 1. **Single-table design** — one DDB table per service, GSIs over multi-table.
-2. **`PointInTimeRecovery=true`** + `deletion_protection=true` on prod tables.
+2. **`point_in_time_recovery_specification` enabled on ALL tables** (not just prod) — use the new spec object with `recovery_period_in_days` driven by `compliance_class` (7 dev / 14 staging / 35 prod). The old `point_in_time_recovery=bool` prop is deprecated. `deletion_protection=true` paired on every prod table. *(R4 / F-AFIE-17)*
 3. **KMS CMK encryption** — never AWS-owned key for tables containing PII / business data.
 4. **No Scan operations** in production code paths (verified via code review + CloudWatch `ConsumedReadCapacityUnits` per-table).
 5. **DDB Streams enabled** (`NEW_AND_OLD_IMAGES`) for any table that downstream services may need to react to.

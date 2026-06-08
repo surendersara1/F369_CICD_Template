@@ -1,6 +1,7 @@
 # SOP — Data Layer (S3, RDS / Aurora, DynamoDB, Secrets Manager)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-17):** Both §3 Monolith and §4 Micro-Stack DynamoDB tables now use the new `point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(...)` (the bool `point_in_time_recovery=` prop is DEPRECATED as of CDK 2025). PITR is ON by default for ALL stages (not just prod). `recovery_period_in_days` driven by `compliance_class` table: dev 7 / staging 14 / prod-* 35. Audit-log tables always get full 35 days + `deletion_protection=True`. AFIE Sprint 10 F-DATA-04 retro: ms-09 dev jobs_ledger corrupted by bad migration script; PITR was off (old `(stage == "prod")` gate); 4 hours engineering to restore manually. CDK prop verified live via https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html.
 **Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
@@ -126,6 +127,32 @@ self.rds_instance = rds.DatabaseInstance(
 from aws_cdk import aws_dynamodb as ddb
 
 
+# F-AFIE-17: PITR on by default for ALL stages — dev disasters happen too.
+# AFIE Sprint 10 F-DATA-04 retro: ms-09 dev jobs_ledger was corrupted by a bad
+# migration script; PITR was off (per the old (stage == "prod") gate); 4 hours
+# of engineering time + manual backfill. Cost of PITR: $0.20/GB/mo storage +
+# $0.02/restore. Cost of NOT having PITR: half an engineer-day, every time.
+# The OLD `point_in_time_recovery=bool` prop is DEPRECATED — use the new
+# `point_in_time_recovery_specification` with recovery_period_in_days for
+# compliance-class tuning. Verified live via:
+# https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html
+_PITR_DAYS_BY_CLASS = {
+    "dev":              7,    # short window OK for ephemeral data
+    "staging":          14,
+    "prod-internal":    35,   # full PITR window
+    "prod-finance":     35,
+    "prod-healthcare":  35,
+    "prod-regulated":   35,
+    "prod-sox":         35,
+}
+_pitr_days = _PITR_DAYS_BY_CLASS.get(
+    self.node.try_get_context("compliance_class") or "prod-internal", 35,
+)
+_pitr_spec = ddb.PointInTimeRecoverySpecification(
+    point_in_time_recovery_enabled=True,
+    recovery_period_in_days=_pitr_days,
+)
+
 self.ddb_tables = {}
 self.ddb_tables["jobs_ledger"] = ddb.Table(
     self, "JobsLedger",
@@ -137,7 +164,8 @@ self.ddb_tables["jobs_ledger"] = ddb.Table(
     encryption_key=self.job_metadata_key,
     time_to_live_attribute="ttl",
     stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
-    point_in_time_recovery=(stage == "prod"),
+    point_in_time_recovery_specification=_pitr_spec,    # F-AFIE-17
+    deletion_protection=(stage == "prod"),              # F-AFIE-17 paired control
     removal_policy=RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY,
 )
 self.ddb_tables["jobs_ledger"].add_global_secondary_index(
@@ -160,7 +188,12 @@ self.ddb_tables["audit_log"] = ddb.Table(
     billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
     encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
     encryption_key=self.job_metadata_key,
-    point_in_time_recovery=True,  # immutable-ish audit trail
+    # F-AFIE-17: audit logs always get the FULL 35-day window regardless of class
+    point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+        point_in_time_recovery_enabled=True,
+        recovery_period_in_days=35,
+    ),
+    deletion_protection=True,                            # audit data — protect always
 )
 ```
 
@@ -303,6 +336,17 @@ class JobLedgerStack(cdk.Stack):
     def __init__(self, scope: Construct, job_metadata_key: kms.IKey, **kwargs) -> None:
         super().__init__(scope, "{project_name}-job-ledger", **kwargs)
 
+        # F-AFIE-17: PITR on by default (see §3 monolith for the AFIE F-DATA-04
+        # retro). Compliance-class-driven recovery window.
+        _PITR_DAYS_BY_CLASS = {
+            "dev": 7, "staging": 14,
+            "prod-internal": 35, "prod-finance": 35, "prod-healthcare": 35,
+            "prod-regulated": 35, "prod-sox": 35,
+        }
+        _pitr_days = _PITR_DAYS_BY_CLASS.get(
+            self.node.try_get_context("compliance_class") or "prod-internal", 35,
+        )
+
         self.jobs_ledger = ddb.Table(
             self, "JobsLedger",
             table_name="{project_name}-jobs-ledger",
@@ -313,7 +357,10 @@ class JobLedgerStack(cdk.Stack):
             encryption_key=job_metadata_key,
             time_to_live_attribute="ttl",
             stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
-            point_in_time_recovery=False,  # POC; True in prod
+            point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+                recovery_period_in_days=_pitr_days,
+            ),
             removal_policy=RemovalPolicy.DESTROY,
         )
         self.jobs_ledger.add_global_secondary_index(
