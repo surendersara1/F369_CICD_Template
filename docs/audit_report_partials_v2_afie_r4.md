@@ -62,7 +62,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard library — 17 canonical rules forward-referenced from all R4 Tier-1-4 fixes + helpers + CI wiring + 5 non-negotiables) ✓ | NEW/PASS |
 | 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (pre-deploy MCP audit + post-deploy boto3 audit, generalizing F-AFIE-11 across detective controls + cost-shape + partial currency + canonical-partial drift; CI workflow + MCP-transport helper) ✓ | NEW/PASS |
 | 26 | `OPS_AWS_SERVICE_CURRENCY_CHECK.md` | **NEW** | F-AFIE-24 (quarterly cadence for 7 partial families + monthly cadence for Bedrock lifecycle + cron-driven CI workflow + auto-issue-on-drift + SOC2-archived output) ✓ | NEW/PASS |
-| 27 | `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` | **NEW** | F-AFIE-25 (model lifecycle dedicated partial) | NEW/PASS |
+| 27 | `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` | **NEW** | F-AFIE-25 (Active/Legacy/EOL lifecycle states + 15-day inactivity rule + AccessDenied incident playbook + cross-region inference-profile resilience + per-invocation lifecycle-retry pattern + monthly maintenance contract) ✓ | NEW/PASS |
 
 ---
 
@@ -932,7 +932,66 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-25 — TBD (remainder of Tier 5)
+### Finding F-AFIE-25 — STRUCTURAL (dedicated Bedrock model lifecycle partial) — RESOLVED 2026-06-17
+**Partial authored:** `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` (NEW)
+
+**Rationale:** R4 F-AFIE-02 in Tier 1 added §3.0 Lifecycle Awareness to `LLMOPS_BEDROCK.md`. That worked for IAM + pricing + InvokeModel patterns, but the lifecycle dimension has a higher drift cadence (monthly, not quarterly), a different consumer surface (agents at invocation time, not just deploy time), and its own incident playbook (the 15-day inactivity rule). F-AFIE-25 carves it out as a dedicated partial that consumers can `[[link]]` without pulling the full LLMOPS_BEDROCK content.
+
+**Structural sections:**
+- §1 Purpose — why lifecycle gets its own partial (drift cadence + invocation-time consumer surface + incident playbook + maintenance cadence)
+- §2 The three states — ACTIVE → LEGACY → EOL transition rules with the 15-day inactivity gotcha highlighted
+- §3 Current Active model snapshot (5 models verified 2026-06-17)
+- §4 Legacy/EOL snapshot (6 transitioning models)
+- §5 **The 15-day inactivity rule incident playbook** — 6-step recovery procedure with AFIE F-AI-01 retro inline
+- §6 Cross-region inference profile resilience — explains *why* the F-AFIE-01 3-ARN canonical includes inference-profile/*; the profile-ARN arm is the failover mechanism. Pool snapshot for us/eu/apne/global prefixes.
+- §7 Pre-deploy + per-invocation patterns:
+  - §7.1 Pre-deploy currency check wire-up (links to F-AFIE-23 + F-AFIE-24)
+  - §7.2 `invoke_with_lifecycle_retry()` — agent runtime wrapper that catches AccessDeniedException, logs lifecycle-aware diagnostic, fails over to SSM-configured fallback, emits Powertools `LifecycleAccessDenied` metric
+  - §7.3 Monthly lifecycle-refresh PR template — for the auto-issue from the F-AFIE-24 cron
+- §8 Five non-negotiables (monthly NOT quarterly; SSM-driven model IDs; every primary has a fallback; 3-ARN IAM; AccessDenied triggers §5 playbook)
+
+**Cross-partial relationships:**
+- `LLMOPS_BEDROCK.md` §3.0 retains a 3-line summary + cross-ref to this partial (so the consumer surface stays small)
+- `OPS_AWS_SERVICE_CURRENCY_CHECK.md` §4.1 (F-AFIE-24) calls out this partial as the monthly check target
+- `OPS_LIVE_READONLY_MCP_AUDIT.md` §3.1 + §4.1 (F-AFIE-23) consumes this partial's tables in pre-deploy + post-deploy audit
+- `_assertions/cdk_synth_guards.md` (F-AFIE-22) covers the IAM 3-ARN enforcement that backs §6 here
+
+**Why "STRUCTURAL" not "HIGH/MED":** This isn't fixing a partial — it's authoring a new consumer surface that prevents the F-AI-01 incident class from recurring across all future kits.
+
+**MCP audit sources:** Re-cited the canonical AWS doc URL (https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html) from F-AFIE-02; no new MCP doc-read required for this partial's structure (lifecycle data is the same data F-AFIE-02 fetched in Tier 1).
+
+---
+
+## Tier 5 + R4 audit summary
+
+**All 25 R4 findings RESOLVED.**
+
+| Tier | Findings | Commits | Partials touched |
+|---|---|---|---|
+| Tier 1 (deploy-blockers) | F-AFIE-01..04 | 5 | 14 |
+| Tier 2 (HIGH security+reliability) | F-AFIE-05..12 | 5 | 12 |
+| Tier 3 (cost levers) | F-AFIE-13..17 | 5 | 10 |
+| Tier 4 (pattern fixes) | F-AFIE-18..21 | 4 | 5 |
+| Tier 5 (structural — net-new partials) | F-AFIE-22..25 | 4 | 4 NEW |
+
+**4 NEW partials authored** (the structural-change deliverables):
+1. `_assertions/cdk_synth_guards.md` — 17 canonical synth-time guards (F-AFIE-22)
+2. `OPS_LIVE_READONLY_MCP_AUDIT.md` — pre + post deploy live audit harness (F-AFIE-23)
+3. `OPS_AWS_SERVICE_CURRENCY_CHECK.md` — quarterly partial-library currency runbook (F-AFIE-24)
+4. `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` — dedicated Bedrock lifecycle partial (F-AFIE-25)
+
+**Root-cause coverage** (per `LESSONS_FROM_AFIE_2026-06.md`):
+
+| Class | Description | Closed by |
+|---|---|---|
+| A | 2024 snapshot drift | F-AFIE-24 (quarterly currency check) |
+| B | Re-derivation despite Canonical-Copy Rule | F-AFIE-22 (synth-guards enforce canonical defaults) |
+| C | Composites don't enforce currency | F-AFIE-22 + F-AFIE-23 (synth-time + runtime gates) |
+| D | Kits don't run live-readonly audit | F-AFIE-23 (post-deploy boto3 audit) |
+| E | No synth-time assertion library | F-AFIE-22 (the library itself) |
+| F | No per-partial regression test scaffolds | F-AFIE-22 §5.1 (per-partial test pattern) |
+
+All 6 R4 root cause classes are now closed.
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
