@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore Identity (IAM SigV4, Cognito, Per-Agent Roles)
 
-**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**Version:** 2.3 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-21 — on top of F-AFIE-01+09):** §3.3 + §4 UserPool config replaced deprecated `advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED` with `feature_plan=cognito.FeaturePlan.PLUS` — the new canonical for adaptive auth + compromised-credentials detection + threat-protection log export. AFIE Sprint 10 F-SEC-06 retro: CFN drift detector flagged ms-09 portal pool as on the legacy tier. §3.4 gotcha rewritten with the new prop name, plan-tier guidance (Essentials for dev/staging; Plus for prod/regulated), and AWS doc URL. Verified live via CDK Python API.
 **R4 update (2026-06-17, on top of v2.1 F-AFIE-01 from 2026-06-16):** §3 `_create_agent_role` signature redesigned — `needs_gateway: bool` / `needs_sub_agents: bool` / `needs_memory: bool` replaced with `gateway_arns: list[str] | None` / `sub_agent_runtime_arns: list[str] | None` / `memory_arns: list[str] | None` + opt-in `permit_wildcard: bool = False`. AFIE Sprint 10 F-GOV-09: prod orchestrator with `gateway/*` invoked teammate's dev-gateway; no incident but POLP violation auditor flagged HIGH. §4 micro-stack `build_agent_role` was already correct (specific ARNs via SSM). §3.4 gotcha codifies the new pattern + forward-ref to F-AFIE-22 synth-guard `assert_no_wildcard_agentcore_grants_in_prod`.
 **R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` alongside `foundation-model/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · `aws_iam` · `aws_cognito` · SigV4 / `botocore.auth` · `httpx` ≥ 0.27 · MCP streamable HTTP transport
@@ -186,7 +187,15 @@ def _create_user_pool(self) -> cognito.UserPool:
             require_digits=True,
             require_symbols=True,
         ),
-        advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED,
+        # F-AFIE-21: Cognito feature plans (Lite / Essentials / Plus) replaced the
+        # old advanced_security_mode pricing structure. PLUS = adaptive auth +
+        # compromised-credentials detection + threat-protection logs export.
+        # AFIE Sprint 10 F-SEC-06 retro: ms-09 portal had advanced_security_mode=
+        # ENFORCED but the prop was being phased out; CFN drift detector flagged
+        # the pool as on the legacy tier. Switch to feature_plan=PLUS for
+        # canonical-current threat protection. AWS doc:
+        # https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-sign-in-feature-plans.html
+        feature_plan=cognito.FeaturePlan.PLUS,
         removal_policy=cdk.RemovalPolicy.RETAIN,
     )
 
@@ -206,7 +215,7 @@ def _create_user_pool(self) -> cognito.UserPool:
 - **R4 / F-AFIE-09: `/*` on gateway/runtime/memory ARNs is now opt-in only.** `_create_agent_role` signature replaced `needs_gateway: bool` with `gateway_arns: list[str] | None`. Pass specific ARN(s) by default; set `permit_wildcard=True` ONLY in dev/exploratory contexts. AFIE Sprint 10 F-GOV-09 retro: ms-09 prod orchestrator role with `gateway/*` invoked a teammate's prototype dev-gateway in the same account, returned ALLOW for a tool that prod-gateway Cedar would have denied. No incident — but auditor flagged HIGH. Synth-guard F-AFIE-22 `assert_no_wildcard_agentcore_grants_in_prod` will fail the build if `permit_wildcard=True` in `prod-*` compliance_class.
 - **`CompositePrincipal`** adds one `sts:AssumeRole` statement per principal. If you never plan to run the container on Fargate, drop `ecs-tasks.amazonaws.com` — keeps the role auditable.
 - **`sms=False` on MFA** is intentional — SMS-OTP is SIM-swap-vulnerable; TOTP only.
-- **`advanced_security_mode=ENFORCED`** enables adaptive auth + compromised-credentials detection. It is priced per MAU — check cost vs. required SOC2 / HIPAA controls.
+- **R4 / F-AFIE-21: `feature_plan=cognito.FeaturePlan.PLUS`** is the new canonical (replaces the deprecated `advanced_security_mode=ENFORCED`). PLUS = Essentials + adaptive auth + compromised-credentials detection + threat-protection log export (S3 / Firehose / CW Logs). Priced per MAU; cost climbs with user count. For dev/staging with synthetic users use `FeaturePlan.ESSENTIALS` (the new default for fresh pools); for prod customer-facing or SOC2/HIPAA-scope use PLUS. AWS doc: https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-sign-in-feature-plans.html. The legacy `advanced_security_mode` prop still works in CFN but is being phased out; AFIE Sprint 10 F-SEC-06 retro: CFN drift detector flagged the legacy tier on ms-09 portal pool.
 - **User Pool removal policy = RETAIN** — never DESTROY a pool that's been in prod; users and group memberships are lost permanently.
 
 ---
@@ -267,7 +276,7 @@ class IdentityStack(cdk.Stack):
             ],
         )
 
-        # User Pool
+        # User Pool — F-AFIE-21: feature_plan=PLUS (see §3 for the AFIE F-SEC-06 retro).
         self.user_pool = cognito.UserPool(
             self, "UserPool",
             user_pool_name="{project_name}-users",
@@ -280,7 +289,7 @@ class IdentityStack(cdk.Stack):
                 require_uppercase=True, require_lowercase=True,
                 require_digits=True,    require_symbols=True,
             ),
-            advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED,
+            feature_plan=cognito.FeaturePlan.PLUS,
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )
 

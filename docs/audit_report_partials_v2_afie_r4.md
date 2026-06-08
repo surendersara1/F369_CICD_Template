@@ -46,7 +46,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 8 | LAYER_SECURITY | PASS (R1) | F-AFIE-05 (4th canonical CMK `notifications_key` with cloudwatch+events+sns principals) ✓ + F-AFIE-09 (DenyAgentCoreInvokeAcrossProjects boundary statement, §3+§4) ✓ | PASS |
 | 9 | AGENTCORE_OBSERVABILITY | PASS (R2) | F-AFIE-06 (canary-log retention ONE_MONTH → ONE_YEAR per §3+§4) ✓ | PASS |
 | 10 | AGENTCORE_AGENT_CONTROL | PASS (R1) | F-AFIE-08 (validation_mode default flipped to VALIDATE + §3.2a canonical Cedar context envelope + DEFAULT_POLICY fail-closed deny-all + RbacLoadError raises instead of silent fallback) ✓ | PASS |
-| 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-01 (3-ARN Bedrock InvokeModel; landed 2026-06-16 as v2.1) + F-AFIE-09 (§3 `_create_agent_role` signature redesigned: needs_* booleans → required `*_arns: list[str]` + opt-in `permit_wildcard`) ✓ | PASS |
+| 11 | AGENTCORE_IDENTITY | PASS (R2) | F-AFIE-01 (3-ARN Bedrock InvokeModel) ✓ + F-AFIE-09 (`_create_agent_role` scoping) ✓ + F-AFIE-21 (UserPool advanced_security_mode=ENFORCED → feature_plan=cognito.FeaturePlan.PLUS in §3.3 + §4; gotcha rewritten with plan-tier guidance) ✓ | PASS |
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (AllowFromPublic flipped True→False; source_vpce_ids required for non-dev; synth-time assert) ✓ | PASS |
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (§3.3 NEW post-deploy verify_security_baseline.py covering all 6 detective controls + §6 non-negotiable #6) ✓ | PASS |
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (tag-condition added to lambda:InvokeFunction + policy-engine/* + gateway/* grants in §3 + §4; gotcha codified) ✓ | PASS |
@@ -58,7 +58,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 20 | LAYER_DATA | WARN (R1) | F-AFIE-17 (deprecated `point_in_time_recovery=bool` → new `point_in_time_recovery_specification` spec object; compliance-class recovery_period_in_days; PITR ON for ALL stages; audit-log full 35-day + deletion_protection) ✓ | PASS |
 | 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (§3.2 single-table + §7 Global Tables v2 use spec object; §10 non-negotiable #2 rewritten) ✓ | PASS |
 | 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors as new canonical default + §3.0a full CDK pattern + §2 decision tree restructured with switch-when criteria + AFIE F-FIN-08 + F-DATA-05 retros) ✓ | PASS |
-| 23 | ENTERPRISE_IDENTITY_CENTER (or new) | UNAUDITED (R11) | F-AFIE-21 (Cognito Plus plan + advanced security) | TBD |
+| 23 | ENTERPRISE_IDENTITY_CENTER | UNAUDITED (R11) | F-AFIE-21 (§6 gotcha codifies IDC-vs-Cognito split + cross-ref to AGENTCORE_IDENTITY §3.3 where the Cognito feature_plan=PLUS canonical now lives) ✓ | PASS |
 | 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard pattern library) | NEW/PASS |
 | 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (live-readonly pre-build audit) | NEW/PASS |
 | 26 | `OPS_AWS_SERVICE_CURRENCY_CHECK.md` | **NEW** | F-AFIE-24 (quarterly refresh runbook) | NEW/PASS |
@@ -789,7 +789,47 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-21 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-21 — MED (Cognito feature_plan=PLUS replaces deprecated advanced_security_mode) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `AGENTCORE_IDENTITY.md` §3.3 + §4 + §3.4 gotcha + `ENTERPRISE_IDENTITY_CENTER.md` §6 gotcha
+
+**Issue (from AFIE Sprint 10 F-SEC-06 MED):** ms-09 portal Cognito user pool used `advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED`. The CFN drift detector flagged the pool as on the LEGACY pricing tier — AWS has been migrating Cognito to a feature-plan model (Lite / Essentials / Plus) where Plus includes adaptive auth + compromised-credentials detection + threat-protection log export. The legacy `advanced_security_mode` prop is being phased out; new pools default to `FeaturePlan.ESSENTIALS`.
+
+**Reframe note on the original plan:** The R4 plan named this finding "ENTERPRISE_IDENTITY_CENTER Cognito Plus plan + advanced security". Investigation showed Cognito user-pool config lives in `AGENTCORE_IDENTITY.md` (not in the Identity Center partial — IDC is workforce SSO, not customer identity). The fix lands in AGENTCORE_IDENTITY where the User Pool construct actually lives, with a complementary navigation gotcha in ENTERPRISE_IDENTITY_CENTER.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-sign-in-feature-plans.html — confirms Lite / Essentials (default for new pools) / Plus tier structure; explicitly states "Previously, some user pool features were included in an advanced security features pricing structure. The features that were included in this structure are now under either the Essentials or Plus plan."
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/cognito/latest/developerguide/feature-plans-features-plus.html — Plus features: adaptive auth, compromised-credentials detection, threat-protection log export.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cognito/UserPool.html (start_index 4500) — confirms canonical Python prop `feature_plan: Optional[FeaturePlan]` with default `FeaturePlan.ESSENTIALS` for new pools.
+
+**Fix applied:**
+
+1. **`AGENTCORE_IDENTITY.md` §3.3 Monolith** — replaced `advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED` with `feature_plan=cognito.FeaturePlan.PLUS`. Inline AFIE F-SEC-06 retro + AWS doc URL.
+
+2. **`AGENTCORE_IDENTITY.md` §4 Micro-Stack** — same replacement; cross-ref to §3 for the AFIE retro.
+
+3. **`AGENTCORE_IDENTITY.md` §3.4 gotcha** — rewrote the `advanced_security_mode=ENFORCED` gotcha:
+   - Renamed: `feature_plan=cognito.FeaturePlan.PLUS` is the new canonical
+   - Plan-tier guidance: dev/staging → ESSENTIALS (new default); prod/regulated → PLUS
+   - Per-MAU pricing caveat (cost climbs with user count)
+   - AWS doc URL
+   - AFIE F-SEC-06 retro (CFN drift detector flagged legacy tier)
+
+4. **`ENTERPRISE_IDENTITY_CENTER.md` §6 NEW gotcha** — codifies the IDC-vs-Cognito split (IDC for workforce SSO; Cognito for customer identity; complementary not interchangeable) + cross-ref to AGENTCORE_IDENTITY §3.3 for the Cognito Plus pattern.
+
+**Headers bumped:** AGENTCORE_IDENTITY 2.2 → 2.3 (third R4 increment); ENTERPRISE_IDENTITY_CENTER 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_cognito_user_pool_uses_feature_plan` — fails synth if any `AWS::Cognito::UserPool` resource has `UserPoolAddOns.AdvancedSecurityMode` set instead of `UserPoolTier`.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-sign-in-feature-plans.html (read 2026-06-17) — Lite/Essentials/Plus tier structure; explicit "advanced security features → folded into Essentials/Plus" callout
+- https://docs.aws.amazon.com/cognito/latest/developerguide/feature-plans-features-plus.html (read 2026-06-17) — Plus features inventory
+- https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cognito/UserPool.html (start_index 4500, read 2026-06-17) — canonical Python prop `feature_plan: Optional[FeaturePlan]`
+
+**grep -r sweep (deferred to Tier 8):** scan for any `advanced_security_mode=` or `AdvancedSecurityMode.ENFORCED` reference across `partials/`, `kits/`, `templates/composite/`; migrate to `feature_plan=cognito.FeaturePlan.PLUS`.
+
+---
+
+### Finding F-AFIE-22 through F-AFIE-25 — TBD (Tier 5+ as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
