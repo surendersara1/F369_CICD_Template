@@ -1,6 +1,7 @@
 # SOP — Event-Driven Fan-In Aggregator (N parallel producers → 1 aggregator)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-22 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-17):** DDB Table migrated from deprecated `point_in_time_recovery=bool` to new `point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(...)`. PITR now ON for ALL stages (dev/staging 7 days, prod 35).
 **Applies to:** AWS CDK v2 (Python 3.12+) · DynamoDB tracking table · SQS or DynamoDB Streams · Lambda aggregator · EventBridge completion event
 
 ---
@@ -88,7 +89,11 @@ def _create_aggregator(self, stage: str) -> None:
         encryption_key=self.kms_key,
         time_to_live_attribute="ttl",
         stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
-        point_in_time_recovery=(stage == "prod"),
+        # F-AFIE-17: PITR on ALL stages via new spec object (bool prop deprecated).
+        point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+            point_in_time_recovery_enabled=True,
+            recovery_period_in_days=35 if stage == "prod" else 7,
+        ),
         removal_policy=(
             RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY
         ),

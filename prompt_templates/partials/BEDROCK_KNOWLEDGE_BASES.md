@@ -1,6 +1,7 @@
 # SOP — Bedrock Knowledge Bases (chunking strategies · vector store options · hybrid search · metadata filters · multi-tenant · citations)
 
-**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**Version:** 2.3 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-10 + F-AFIE-18 reconciliation):** §3.1 OpenSearch variant network policy now requires `source_vpce_ids` for non-dev `compliance_class`; the legacy `AllowFromPublic: True` is fenced to dev-only via assertion. Aligns with `DATA_OPENSEARCH_SERVERLESS.md` §3 (F-AFIE-10).
 **R4 update (2026-06-17, F-AFIE-18):** Added Amazon S3 Vectors as the NEW canonical default for cost-sensitive RAG (≤ ~50K vectors, semantic-only). §2 decision tree restructured with explicit "switch to OpenSearch when..." criteria + AFIE F-FIN-08 retro (OpenSearch idle floor ~$700/mo → S3 Vectors ~$2/mo for the same 5K-vector workload). §3.0a NEW — full CDK pattern for `BedrockKbS3VectorsStack` (vector bucket + index + KB execution role with scoped s3vectors:* grants + KB with `storage_configuration.type=S3_VECTORS`). Verified live via canonical doc + CFN template ref + AFIE F-DATA-05 retro on hierarchical-chunking-vs-metadata-limit (5-level config dropped 8% of chunks).
 **R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). Embedding/parsing/rerank `model_arn=` references in `CfnDataSource`/`Retrieve` API calls are unchanged (those take specific foundation-model ARNs — not affected by the inference-profile gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock Knowledge Bases (GA Nov 2023) · Vector store options: OpenSearch Serverless / Aurora PostgreSQL pgvector / Pinecone / Redis Cloud / MongoDB Atlas / Neptune Analytics · Chunking strategies: default + fixed + hierarchical + semantic + custom Lambda · Hybrid search (BM25 + vector) · Metadata filters · Multi-tenant via filters · Generation models: Claude / Llama / Mistral · Citations + retrieval-only API
@@ -298,16 +299,29 @@ class BedrockKbStack(Stack):
                 "KmsARN": kms_key.key_arn,
             }),
         )
+        # F-AFIE-10 + F-AFIE-18 reconciliation: this OpenSearch variant of the BKB
+        # partial inherits the canonical secure default. For non-dev compliance_class
+        # source_vpce_ids is REQUIRED; AllowFromPublic=True is the dev-only fallback.
+        # See DATA_OPENSEARCH_SERVERLESS.md §3 for the matching pattern.
+        assert source_vpce_ids or compliance_class == "dev", (
+            "F-AFIE-10: BKB OpenSearch network policy needs source_vpce_ids for non-dev. "
+            "Pass compliance_class='dev' or source_vpce_ids=[<vpce>...] to OssKbStack."
+        )
+        if compliance_class == "dev" and not source_vpce_ids:
+            net_rules = [{
+                "Rules": [{"ResourceType": "collection", "Resource": [f"collection/{env_name}-kb"]}],
+                "AllowFromPublic": True,
+            }]
+        else:
+            net_rules = [{
+                "Rules": [{"ResourceType": "collection", "Resource": [f"collection/{env_name}-kb"]}],
+                "AllowFromPublic": False,
+                "SourceVPCEs": source_vpce_ids,
+            }]
         oss.CfnSecurityPolicy(self, "OssNetPolicy",
             name=f"{env_name}-kb-net",
             type="network",
-            policy=json.dumps([{
-                "Rules": [
-                    {"ResourceType": "collection",
-                     "Resource": [f"collection/{env_name}-kb"]},
-                ],
-                "AllowFromPublic": True,                       # use VPC for prod
-            }]),
+            policy=json.dumps(net_rules),
         )
         kb_collection = oss.CfnCollection(self, "KbCollection",
             name=f"{env_name}-kb",

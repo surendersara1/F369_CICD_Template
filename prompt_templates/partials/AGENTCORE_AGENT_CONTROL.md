@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore Agent Control (Cedar, Guardrails, RBAC, HITL)
 
-**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-17):** §3.4 RBAC table (line 246) migrated to new `point_in_time_recovery_specification` spec object. §4 RBAC table (line 477) flagged for R5 with same pattern.
 **R4 update (2026-06-17):** Three governance-grade fixes from AFIE Sprint 8 retro:
 - **§3.2 + §4 CfnPolicy `validation_mode`** flipped IGNORE_ALL_FINDINGS → VALIDATE as default (AFIE F-GOV-03: typo'd rule no-op'd for 3 weeks in prod).
 - **§3.2a NEW** canonical Cedar context envelope spec (persona/amount/risk_tier/...) — without it, `forbid ... when { context.amount > 1M }` silently no-ops (AFIE F-GOV-02: $4.7M auto-approval slipped through).
@@ -243,7 +244,11 @@ def _create_rbac_table(self, cmk: kms.IKey) -> ddb.Table:
         billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
         encryption=ddb.TableEncryption.CUSTOMER_MANAGED,
         encryption_key=cmk,
-        point_in_time_recovery=True,
+        # F-AFIE-17: PITR via new spec object (bool prop deprecated).
+        point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+            point_in_time_recovery_enabled=True,
+            recovery_period_in_days=35,
+        ),
         removal_policy=cdk.RemovalPolicy.RETAIN,
     )
 ```

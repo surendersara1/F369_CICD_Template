@@ -1,6 +1,7 @@
 # SOP — Audio ML Pipeline (ingest → preprocess → feature-extract → curated)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-22 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-17):** Site at line 164 (§3 Monolith) migrated to new `point_in_time_recovery_specification` spec object. PITR now ON for ALL stages. Site at line 914 (§4 Micro-Stack) retained on the deprecated bool prop pending a future audit pass — it uses `stage_name` not `stage` and lives in a different scope; flagged for R5.
 **Applies to:** AWS CDK v2 (Python 3.12+) · S3 raw-audio + EventBridge · `librosa` 0.10.x · `torchaudio` 2.x (optional) · `pywavelets` 1.6+ · `scipy` 1.13+ · `soundfile` 0.12+ · Lambda container image OR SageMaker Processing Fargate · DynamoDB `audio_metadata` · KMS CMK per stack
 
 ---
@@ -161,7 +162,11 @@ def _create_audio_pipeline(self, stage: str) -> None:
         encryption_key=self.kms_key,
         time_to_live_attribute="ttl",
         stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
-        point_in_time_recovery=(stage == "prod"),
+        # F-AFIE-17: PITR on ALL stages via new spec object (bool prop deprecated).
+        point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+            point_in_time_recovery_enabled=True,
+            recovery_period_in_days=35 if stage == "prod" else 7,
+        ),
         removal_policy=(
             RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY
         ),

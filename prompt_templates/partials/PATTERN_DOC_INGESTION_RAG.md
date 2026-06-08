@@ -1,6 +1,7 @@
 # SOP — Document Ingestion RAG Pipeline (parse → chunk → embed → store)
 
-**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-17):** Site at line 139 (§3 Monolith) migrated to new `point_in_time_recovery_specification` spec object. PITR now ON for ALL stages. Site at line 765 (§4 Micro-Stack) flagged for R5 — same pattern as MLOPS_AUDIO_PIPELINE §4.
 **R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · S3 raw + EventBridge · Textract / Unstructured / PyPDF · Bedrock Titan Text Embeddings v2 (1024 / 512 / 256 dims) · Amazon S3 Vectors (primary) · Bedrock Knowledge Base (managed alternative) · DynamoDB doc-metadata table · SQS DLQ · SHA256-deterministic idempotency key
 
@@ -136,7 +137,11 @@ def _create_doc_ingestion_rag(self, stage: str) -> None:
         encryption_key=self.kms_key,
         time_to_live_attribute="ttl",
         stream=ddb.StreamViewType.NEW_AND_OLD_IMAGES,
-        point_in_time_recovery=(stage == "prod"),
+        # F-AFIE-17: PITR on ALL stages via new spec object (bool prop deprecated).
+        point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+            point_in_time_recovery_enabled=True,
+            recovery_period_in_days=35 if stage == "prod" else 7,
+        ),
         removal_policy=(
             RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY
         ),
