@@ -57,7 +57,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 19 | LAYER_NETWORKING | PASS (R1) | F-AFIE-16 (nat_gateways=0 dev/staging default; 7 → 13 interface endpoints + DDB gateway endpoint; §3.1 gotcha codifies break-even math) ✓ | PASS |
 | 20 | LAYER_DATA | WARN (R1) | F-AFIE-17 (deprecated `point_in_time_recovery=bool` → new `point_in_time_recovery_specification` spec object; compliance-class recovery_period_in_days; PITR ON for ALL stages; audit-log full 35-day + deletion_protection) ✓ | PASS |
 | 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (§3.2 single-table + §7 Global Tables v2 use spec object; §10 non-negotiable #2 rewritten) ✓ | PASS |
-| 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors backend + decision tree) | TBD |
+| 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors as new canonical default + §3.0a full CDK pattern + §2 decision tree restructured with switch-when criteria + AFIE F-FIN-08 + F-DATA-05 retros) ✓ | PASS |
 | 23 | ENTERPRISE_IDENTITY_CENTER (or new) | UNAUDITED (R11) | F-AFIE-21 (Cognito Plus plan + advanced security) | TBD |
 | 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard pattern library) | NEW/PASS |
 | 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (live-readonly pre-build audit) | NEW/PASS |
@@ -677,7 +677,46 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-18 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-18 — MED (S3 Vectors as new canonical default for cost-sensitive RAG) — RESOLVED 2026-06-17
+**Partial fixed:** `BEDROCK_KNOWLEDGE_BASES.md` §2 decision tree + §3.0a NEW
+
+**Issue (from AFIE Sprint 10 F-FIN-08 MED + F-DATA-05 LOW):**
+- F-FIN-08: AFIE-CPG used OpenSearch Serverless with 2 collections (~5K vectors total — 35 SOP docs + anomaly history). OpenSearch idle floor was ~$700/mo (2 OCU minimum). Same workload on S3 Vectors would have been ~$2/mo. The canonical partial defaulted to OpenSearch with no alternative-store guidance.
+- F-DATA-05: When AFIE eventually migrated to S3 Vectors, ms-09 used hierarchical chunking with a 5-level parent-child tree. Hierarchical context lands in S3 Vectors non-filterable metadata; the 1 KB per-vector cap was exceeded for 8% of chunks, which silently dropped at ingestion (no `KnowledgeBaseIngestionError` event because the chunks weren't malformed, just oversized). No documentation hint that hierarchical chunking is incompatible with S3 Vectors at depth.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__search_documentation` → https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-bedrock-kb.html confirms GA integration.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → S3 Vectors KB doc (start_index 0 + 8000) — confirms semantic-only (no hybrid), 1 KB metadata cap + 35 keys per vector, 100ms warm / sub-second cold latency, no binary embeddings, hierarchical-chunking-vs-metadata-limit caveat.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-bedrock-knowledgebase-s3vectorsconfiguration.html — canonical CFN `S3VectorsConfiguration` property (`IndexArn`, `IndexName`, `VectorBucketArn`).
+
+**Fix applied:**
+
+1. **§2 decision tree restructured** — S3 Vectors added as the top row + flagged as NEW canonical default. Full feature comparison table (RPS, cost, hybrid search support, metadata cap). Explicit "switch to OpenSearch when..." 5-bullet criteria (hybrid search / > 50K vectors / < 50ms latency budget / > 1 KB metadata / hierarchical chunking with deep trees). AFIE F-FIN-08 retro inlined ($700/mo → $2/mo).
+
+2. **§3.0a NEW full CDK pattern** — `BedrockKbS3VectorsStack` covering:
+   - `s3v.CfnVectorBucket` with KMS encryption
+   - `s3v.CfnIndex` with `float32 / cosine / dim=1024` (Titan v2-compatible) + metadata configuration
+   - KB execution role: Bedrock InvokeModel via the 3-ARN canonical (F-AFIE-01), S3 source read, and **scoped** `s3vectors:*` actions (not wildcards) to bucket + index ARN
+   - `CfnKnowledgeBase.storage_configuration.type="S3_VECTORS"` with `s3_vectors_configuration` (vector_bucket_arn + index_arn + index_name)
+   - `CfnDataSource` with FIXED_SIZE chunking (safer than hierarchical with S3 Vectors); inline F-DATA-05 retro comment
+   - Inline AWS doc URLs for KB permissions + the integration overview
+
+3. **§3 Monolith preamble** — banner note pointing readers at §3.0a as the cost-sensitive default, with cross-ref to §2 decision tree.
+
+**Header bumped:** BEDROCK_KNOWLEDGE_BASES 2.1 → 2.2.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_kb_with_oss_only_when_decision_tree_match` — composite-level synth-guard that warns (not fails) when `OPENSEARCH_SERVERLESS` storage type is used but the SOW context doesn't indicate hybrid search / latency-critical / large-vector requirements.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-bedrock-kb.html (read 2026-06-17, start_index 0 + 8000)
+- https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-bedrock-knowledgebase-s3vectorsconfiguration.html (read 2026-06-17)
+- https://docs.aws.amazon.com/bedrock/latest/userguide/kb-permissions.html#kb-permissions-s3vectors (cited inline)
+
+**grep -r sweep (deferred to Tier 8):** scan for any KB CDK using `OPENSEARCH_SERVERLESS` for small-vector workloads (<10K projected) in `partials/`, `kits/`, `templates/composite/`; flag for S3 Vectors review.
+
+---
+
+### Finding F-AFIE-19 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
