@@ -60,7 +60,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 22 | BEDROCK_KNOWLEDGE_BASES | UNAUDITED (R15) | F-AFIE-18 (S3 Vectors as new canonical default + §3.0a full CDK pattern + §2 decision tree restructured with switch-when criteria + AFIE F-FIN-08 + F-DATA-05 retros) ✓ | PASS |
 | 23 | ENTERPRISE_IDENTITY_CENTER | UNAUDITED (R11) | F-AFIE-21 (§6 gotcha codifies IDC-vs-Cognito split + cross-ref to AGENTCORE_IDENTITY §3.3 where the Cognito feature_plan=PLUS canonical now lives) ✓ | PASS |
 | 24 | `_assertions/cdk_synth_guards.md` | **NEW** | F-AFIE-22 (synth-time guard library — 17 canonical rules forward-referenced from all R4 Tier-1-4 fixes + helpers + CI wiring + 5 non-negotiables) ✓ | NEW/PASS |
-| 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (live-readonly pre-build audit) | NEW/PASS |
+| 25 | `OPS_LIVE_READONLY_MCP_AUDIT.md` | **NEW** | F-AFIE-23 (pre-deploy MCP audit + post-deploy boto3 audit, generalizing F-AFIE-11 across detective controls + cost-shape + partial currency + canonical-partial drift; CI workflow + MCP-transport helper) ✓ | NEW/PASS |
 | 26 | `OPS_AWS_SERVICE_CURRENCY_CHECK.md` | **NEW** | F-AFIE-24 (quarterly refresh runbook) | NEW/PASS |
 | 27 | `LLMOPS_BEDROCK_MODEL_LIFECYCLE.md` | **NEW** | F-AFIE-25 (model lifecycle dedicated partial) | NEW/PASS |
 
@@ -873,7 +873,34 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-23 through F-AFIE-25 — TBD (Tier 5+ as fixes land)
+### Finding F-AFIE-23 — STRUCTURAL (live-readonly MCP audit harness) — RESOLVED 2026-06-17
+**Partial authored:** `OPS_LIVE_READONLY_MCP_AUDIT.md` (NEW)
+
+**Rationale (1 of 4 R4 structural changes per `LESSONS_FROM_AFIE_2026-06.md`):** F-AFIE-11 in Tier 2 demonstrated the inline `verify_security_baseline.py` pattern for detective controls. F-AFIE-23 generalizes it across all R4 dimensions (detective + cost + partial currency + canonical-partial drift) and makes it kit-level rather than per-partial.
+
+**Coverage — two phases, full lifecycle:**
+
+| Phase | When | Scripts | What it catches |
+|---|---|---|---|
+| **Pre-deploy MCP audit** (§3) | Before `cdk deploy` | `pre_deploy_audit.py` | Bedrock model lifecycle drift (F-AFIE-02), pricing snapshot age (F-AFIE-20), partial Last-reviewed freshness, canonical-partial hash drift |
+| **Post-deploy boto3 audit** (§4) | After `cdk deploy` | `post_deploy_audit.py` | Cognito feature_plan (F-AFIE-21), DDB PITR live state (F-AFIE-17), Bedrock active models cross-check (F-AFIE-02), Aurora dev MinCapacity (F-AFIE-13), CW alarm TreatMissingData (F-AFIE-07), OSS NetworkPolicy public access (F-AFIE-10), NAT gateway presence in dev (F-AFIE-16), CloudFront ACM region (F-AFIE-04), Bedrock cost-shape vs envelope (F-AFIE-20) |
+
+**Structural sections:**
+- §1 Purpose — Class D (kits don't run live-readonly audit) rationale + 3 specific AFIE retros that motivated it
+- §2 Decision — when each phase is MANDATORY vs optional by risk class
+- §3 Pre-deploy MCP audit — 4 full Python scripts (lifecycle / pricing-drift / partial-currency / partial-drift)
+- §4 Post-deploy boto3 audit — 3 full scripts (detective controls inventory / network exposure / cost-shape)
+- §5 CI wiring — full GitHub Actions YAML chaining pre-audit → synth-guards (F-AFIE-22) → deploy → post-audit
+- §6 MCP-helper shim — `read_aws_doc()` wrapper supporting HTTP/STDIO transports + plain-GET fallback
+- §7 Five non-negotiables (mandatory for prod-*; reports archived; READ-ONLY API calls; tag-scoped audit role; block-don't-auto-remediate)
+
+**Why "STRUCTURAL" not "HIGH/MED":** This isn't fixing a partial — it's authoring the enforcement layer for the partials. The CFN-success-≠-service-live gap that hit AFIE F-SEC-05 (Inspector2 silently disabled for 6 weeks) is exactly what this closes.
+
+**MCP audit sources:** Used AWS Documentation MCP server API surface (`read_documentation`, `search_documentation`) as authoritative for the helper shim. boto3 API names verified inline.
+
+---
+
+### Finding F-AFIE-24 + F-AFIE-25 — TBD (remainder of Tier 5)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
