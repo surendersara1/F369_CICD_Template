@@ -37,7 +37,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | # | Partial | Pre-R4 grade | R4 fixes applied | Post-R4 grade |
 |---|---|---|---|---|
 | 1 | AGENTCORE_RUNTIME | WARN (R2 alpha drift) | F-AFIE-01 (inference-profile/* IAM) ✓ | PASS |
-| 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 (§3.0 lifecycle awareness) ✓ + F-AFIE-20 (pricing SoT — pending) | PASS (F-AFIE-01+02); WARN pending F-AFIE-20 |
+| 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 (§3.0 lifecycle awareness) ✓ + F-AFIE-20 (§3.0b pricing SoT + cost-aware routing + 4-token-type CUR reconciliation + SSM-driven model_router + per-invoke CW metrics) ✓ | PASS |
 | 3 | LAYER_API | WARN (R1 F002 fix never landed) | F-AFIE-03 (R1 fix + default_method_options + AFIE F-INT-01 retro) ✓ + F-AFIE-19 ($connect WebSocketLambdaAuthorizer + JWT-validating handler + explicit-Deny on bad token + AFIE F-INT-02 retro) ✓ | PASS |
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (canonical-pattern intent made explicit + verified default_authorizer mandate) ✓ | PASS |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (§3.0 TLS pick-one decision tree + G-NEW-05 retro + us-east-1 pin reinforced) ✓ | PASS |
@@ -755,7 +755,41 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-20 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-20 — MED (Bedrock pricing source-of-truth + cost-aware routing) — RESOLVED 2026-06-17
+**Partial fixed:** `LLMOPS_BEDROCK.md` §3.0b NEW
+
+**Issue (from AFIE Sprint 10 F-FIN-09 MED):** ms-09 routed every Bedrock query — including `is_pii(text)?` classification — through Claude Sonnet 4.5 at $3/M input + $15/M output. Week 6 bill was $4,200 vs $1,800 forecast. Re-routing classification + extraction to Haiku (~$0.80/M input + $4/M output) would have saved ~60% of the bill. Root cause: the canonical partial had model IDs and lifecycle awareness (§3.0 from F-AFIE-02) but **no pricing context** to inform cheap-routing decisions, and **no per-invoke metrics** to surface the cost-per-query as the bill grew.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__search_documentation` → confirmed AWS does NOT publish pricing on docs.aws.amazon.com — pricing is on aws.amazon.com/bedrock/pricing (which the MCP doc server doesn't serve). Reconciliation source is CUR 2.0.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/bedrock/latest/userguide/cost-mgmt-understanding-cur-data.html — confirms 4 token-type categories (input, output, cache-read, cache-write) and 3 service tiers (standard/priority/flex). AWS canonical guidance: "If you only sum input and output tokens, your totals will not match your bill."
+
+**Fix applied:**
+
+1. **§3.0b NEW — Pricing source-of-truth + cost-aware model routing**, covering:
+   - Authoritative SoT URLs (pricing page + CUR 2.0 doc)
+   - 4 token-type table (with cache-read significantly cheaper than input; cache-write more expensive)
+   - 3 service tiers (standard / priority for guaranteed capacity / flex for batch-discount)
+   - Per-model $/M-token pricing snapshot for the 4 Active models (Sonnet 4.5, Haiku 4.5, Titan-embed-text v2, Cohere Rerank v3.5) — flagged "verify against the SoT URL before every deploy"
+   - **Cost-aware routing pattern** — `agents/shared/model_router.py` reads model ID from SSM by `TaskClass` enum (REASONING → Sonnet; CLASSIFICATION/EXTRACTION → Haiku; EMBEDDING → Titan)
+   - SSM publish snippet — `infra/stacks/ai_stack.py` publishes one SSM param per TaskClass so model swaps are one-line SSM updates, not redeploys
+   - **Per-invoke metrics emitter** — `agents/shared/bedrock_metrics.py` uses Powertools `Metrics` to emit per-invoke `InputTokens` / `OutputTokens` / `CacheReadTokens` / `CacheWriteTokens` to the `{project_name}/Bedrock` namespace, dimensioned by `ModelId` + `Task`. Pair with CW metric math (× $/token) to get a near-real-time cost graph.
+   - **Pre-deploy cost-check checklist** — 4-item gate before deploy
+   - AFIE F-FIN-09 retro inlined ($4,200 vs $1,800)
+
+**Header bumped:** LLMOPS_BEDROCK 2.2 → 2.3 (now CANONICAL for ARN shapes + lifecycle awareness + cost-aware routing).
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_bedrock_invoke_has_ssm_routed_model` — fails synth if any Lambda calling `bedrock-runtime:InvokeModel` has a literal model ID in `environment={}` (must come from SSM). `assert_bedrock_invoke_emits_powertools_metrics` — composite-level check that the project ships `bedrock_metrics.py` and per-invoke emission lines.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/bedrock/latest/userguide/cost-mgmt-understanding-cur-data.html (read 2026-06-17) — 4 token types + 3 service tiers
+- https://aws.amazon.com/bedrock/pricing/ (referenced inline; NOT MCP-fetchable since it's on aws.amazon.com not docs.aws.amazon.com)
+
+**grep -r sweep (deferred to Tier 8):** scan for literal `anthropic.claude-*` model IDs in Lambda env vars across `partials/`, `kits/`, `templates/composite/` — must be SSM-driven instead.
+
+---
+
+### Finding F-AFIE-21 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
