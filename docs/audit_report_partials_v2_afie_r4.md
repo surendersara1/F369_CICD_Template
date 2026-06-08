@@ -52,8 +52,8 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (tag-condition added to lambda:InvokeFunction + policy-engine/* + gateway/* grants in §3 + §4; gotcha codified) ✓ | PASS |
 | 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (min_capacity dev default 0.5→0; serverless_v2_auto_pause_duration=300s; prod retains 0.5 for cold-start; both §3 + §4) ✓ | PASS |
 | 16 | DATA_DBT_REDSHIFT_SERVERLESS + MLOPS_DATA_PLATFORM + DATA_LAKEHOUSE_ICEBERG + DATA_ZERO_ETL | TBD | F-AFIE-14 (max_capacity MANDATORY across all 4 partials creating CfnWorkgroup; dbt partial gains pitfall row; prod cap lowered 512→256 starting point) ✓ | PASS |
-| 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (Fargate Spot for dev) | TBD |
-| 18 | LAYER_BACKEND_ECS | PASS (R1) | F-AFIE-15 (Spot pattern cross-ref) | TBD |
+| 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (§9 gotcha codifies stage-tuned FARGATE_SPOT mix + AFIE F-FIN-06 retro) ✓ | PASS |
+| 18 | LAYER_BACKEND_ECS | PASS (R1) | F-AFIE-15 (§3 + §4 capacity_provider_strategies stage-tuned: dev SPOT 9 + base-0 / staging SPOT 5 + FARGATE base=1 / prod SPOT 3 + FARGATE base=1) ✓ | PASS |
 | 19 | LAYER_NETWORKING | PASS (R1) | F-AFIE-16 (interface endpoints over NAT) | TBD |
 | 20 | LAYER_DATA | WARN (R1) | F-AFIE-17 (PITR on by default + spec object) | TBD |
 | 21 | SERVERLESS_DYNAMODB_PATTERNS | UNAUDITED (R10) | F-AFIE-17 (PITR + spec object) | TBD |
@@ -579,7 +579,35 @@ The function-name prefix is a *naming convention* not a *security boundary*. A t
 
 ---
 
-### Finding F-AFIE-15 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-15 — MED (Fargate Spot stage-tuned mix) — RESOLVED 2026-06-17
+**Partial(s) fixed:** `LAYER_BACKEND_ECS.md` §3 + §4 + `ECS_PRODUCTION_HARDENING.md` §9
+
+**Issue (from AFIE Sprint 10 F-FIN-06 MED):** ms-09 dev cluster ran 100% on-demand FARGATE for 8 weeks (~$420/mo). Spot interruption rates in the deploy region were measured at <2% for the AFIE workload class — fully tolerable for dev/staging. Same workload on a SPOT-heavy mix would have been ~$120/mo. Canonical `LAYER_BACKEND_ECS` partial used a single hard-coded 3:1 Spot:FARGATE mix across all stages; no stage-conditional logic to favor Spot in dev.
+
+**Evidence (verified via library inspection):** `LAYER_BACKEND_ECS.md` §3 line 147-154 + §4 line 349-352 — confirmed both had identical 3:1 mix with `base=1` for FARGATE.
+
+**Fix applied:**
+
+1. **`LAYER_BACKEND_ECS.md` §3 Monolith** — replaced static `cps` list with stage-conditional:
+   - `dev` → SPOT 9 + FARGATE 1, no `base` (any task can be Spot)
+   - `staging` → SPOT 5 + FARGATE 1 base=1
+   - `prod` → SPOT 3 + FARGATE 1 base=1 (unchanged from original)
+
+2. **`LAYER_BACKEND_ECS.md` §4 Micro-Stack** — same stage-conditional applied; inline cross-ref to §3 for the AFIE retro.
+
+3. **`ECS_PRODUCTION_HARDENING.md` §9 gotchas** — new entry codifying the canonical stage-tuned pattern + AFIE F-FIN-06 retro. CDK code lives in LAYER_BACKEND_ECS; this partial holds the production-hardening rationale.
+
+**Headers bumped:** LAYER_BACKEND_ECS 2.0 → 2.1; ECS_PRODUCTION_HARDENING 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_dev_ecs_service_uses_spot_heavy_mix` — fails synth if `compliance_class == "dev"` and any `AWS::ECS::Service` has `capacity_provider_strategy` where FARGATE weight ≥ FARGATE_SPOT weight.
+
+**MCP audit sources:** Used library inspection + canonical Fargate Spot pricing reference (https://aws.amazon.com/fargate/pricing/). No new MCP doc-read required — Spot vs On-Demand cost ratio is well-documented at ~70% savings and the F-FIN-06 retro is a cost-engineering decision rather than an API-contract question.
+
+**grep -r sweep (deferred to Tier 8):** scan for `capacity_provider_strategies` lists where FARGATE_SPOT weight < FARGATE weight in `compliance_class == "dev"` contexts.
+
+---
+
+### Finding F-AFIE-16 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 

@@ -1,6 +1,7 @@
 # SOP — Backend ECS Fargate (Long-Running Tasks)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-15):** §3 Monolith + §4 Micro-Stack `capacity_provider_strategies` now stage-tuned: dev → SPOT 9 + base-0 (any task type can be Spot); staging → SPOT 5 + FARGATE base=1; prod → SPOT 3 + FARGATE base=1. AFIE Sprint 10 F-FIN-06 retro: ms-09 dev ran 100% on-demand FARGATE for 8 weeks (~$420/mo) when SPOT-heavy mix would have been ~$120/mo. Prod keeps `base=1` on-demand to guarantee at least one task survives a Spot-eviction wave.
 **Applies to:** AWS CDK v2 (Python 3.12+) · Fargate arm64 · container runtime Python/Node/etc.
 
 ---
@@ -137,6 +138,27 @@ def _create_ecs(self, stage: str) -> None:
         readonly_root_filesystem=True,  # hardening — container FS is immutable
     )
 
+    # F-AFIE-15: Spot weight is stage-tuned. AFIE Sprint 10 F-FIN-06 retro:
+    # ms-09 dev ran on 100% FARGATE (no Spot) for 8 weeks at ~$420/mo when the
+    # same workload on FARGATE_SPOT-heavy mix would have been ~$120/mo. Spot
+    # interruption rate for the AFIE region was <2% — tolerable for dev/staging.
+    # Prod keeps base=1 on-demand to guarantee at least one task survives a Spot
+    # eviction wave.
+    if stage == "dev":
+        cps = [
+            ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=9),
+            ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1),
+        ]
+    elif stage == "staging":
+        cps = [
+            ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=5),
+            ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1, base=1),
+        ]
+    else:  # prod
+        cps = [
+            ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=3),
+            ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1, base=1),
+        ]
     # Service (persistent, autoscaled) OR scheduled task (one-off)
     service = ecs.FargateService(
         self, "WorkerService",
@@ -144,14 +166,7 @@ def _create_ecs(self, stage: str) -> None:
         cluster=self.ecs_cluster,
         task_definition=task_def,
         desired_count=1,
-        capacity_provider_strategies=[
-            ecs.CapacityProviderStrategy(
-                capacity_provider="FARGATE_SPOT", weight=3
-            ),
-            ecs.CapacityProviderStrategy(
-                capacity_provider="FARGATE", weight=1, base=1,
-            ),
-        ],
+        capacity_provider_strategies=cps,
         circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         enable_execute_command=(stage != "prod"),  # ECS Exec for dev/staging debugging
     )
@@ -325,6 +340,23 @@ class FargateStack(cdk.Stack):
             readonly_root_filesystem=True,
         )
 
+        # F-AFIE-15: see §3 for the AFIE F-FIN-06 retro. Same stage-tuned Spot mix
+        # applied here (Micro-Stack BackendStack).
+        if stage_name == "dev":
+            cps = [
+                ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=9),
+                ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1),
+            ]
+        elif stage_name == "staging":
+            cps = [
+                ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=5),
+                ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1, base=1),
+            ]
+        else:
+            cps = [
+                ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=3),
+                ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1, base=1),
+            ]
         self.service = ecs.FargateService(
             self, "Service",
             service_name="{project_name}-worker",
@@ -332,10 +364,7 @@ class FargateStack(cdk.Stack):
             task_definition=task_def,
             desired_count=1,
             security_groups=[ecs_sg],
-            capacity_provider_strategies=[
-                ecs.CapacityProviderStrategy(capacity_provider="FARGATE_SPOT", weight=3),
-                ecs.CapacityProviderStrategy(capacity_provider="FARGATE", weight=1, base=1),
-            ],
+            capacity_provider_strategies=cps,
             circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         )
 
