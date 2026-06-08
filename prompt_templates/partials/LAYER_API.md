@@ -1,6 +1,7 @@
 # SOP — API Layer (REST + WebSocket via API Gateway)
 
-**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-19 — on top of F-AFIE-03 from 2026-06-16):** §5 WebSocket variant now MANDATES `$connect` authorization. Added (a) `authorizers.WebSocketLambdaAuthorizer` wired to a Cognito-JWT-validating Lambda; (b) full `lambda/ws_connect_authorizer/ws_connect_authorizer.py` handler with explicit Deny policy on bad/missing token (never returns None); (c) inline AFIE Sprint 8 F-INT-02 retro + canonical AWS doc URL. Token passed via `?token=<jwt>` querystring (browsers can't set custom headers on WebSocket upgrade). Forward-ref F-AFIE-22 synth-guard: `assert_websocket_connect_route_has_authorizer`.
 **R4 update (2026-06-16):**
 - Fixed R1-F002 broken `CognitoUserPoolsAuthorizer` placeholder (recommended fix never applied) — now imports user pool by ARN and instantiates authorizer correctly.
 - Added `RestApi.root.default_method_options = MethodOptions(authorization_type=COGNITO, authorizer=…)` to mandate authorizer attachment on EVERY method including those added via `addProxy({anyMethod:true})`. Closes AFIE Sprint 8 F-INT-01 (every `/api/*` route was internet-open because default was `AuthorizationType.NONE`).
@@ -263,18 +264,49 @@ This adds a resource-policy statement to the Lambda (local to ComputeStack) with
 
 ## 5. WebSocket variant (for push updates)
 
+**F-AFIE-19 — `$connect` authorization is MANDATORY.** The canonical AWS guidance is unambiguous: "we recommend that you configure an authorizer for the `$connect` route on all your WebSocket APIs" (https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-control-access.html). AFIE Sprint 8 F-INT-02 retro: ms-09's portal stack created the WebSocket API without a `$connect` authorizer. Any client could open a wss:// session and start sending action messages; the per-message handlers then read `event.requestContext.authorizer.claims` which was empty → access checks no-op'd same as the REST-API F-INT-01 case. Two patterns below — Lambda REQUEST authorizer (Cognito-token-bearing) is the canonical default; IAM authorization is the alternative when clients sign with SigV4.
+
 ```python
 from aws_cdk import aws_apigatewayv2 as apigwv2, aws_apigatewayv2_integrations as integrations
+from aws_cdk import aws_apigatewayv2_authorizers as authorizers
+from aws_cdk import aws_lambda as _lambda
 
+# ── 5.1 $connect authorizer Lambda — REQUEST type (parses Cognito JWT) ─────
+# AWS doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-lambda-auth.html
+# This Lambda runs ONCE per connect attempt; it validates the JWT in
+# `event.queryStringParameters.token` (clients pass `?token=<jwt>` in the wss URL,
+# since WebSocket clients can't set custom headers in the browser) and returns
+# an IAM policy allowing/denying execute-api:Invoke on the session.
+ws_connect_authorizer_fn = _lambda.Function(
+    self, "WsConnectAuthorizerFn",
+    function_name=f"{{project_name}}-ws-connect-authorizer",
+    runtime=_lambda.Runtime.PYTHON_3_13,
+    handler="ws_connect_authorizer.handler",
+    code=_lambda.Code.from_asset("lambda/ws_connect_authorizer"),
+    environment={
+        "USER_POOL_ID":         user_pool.user_pool_id,
+        "USER_POOL_CLIENT_ID":  user_pool_client.user_pool_client_id,
+        "REGION":               self.region,
+    },
+)
+
+ws_authorizer = authorizers.WebSocketLambdaAuthorizer(
+    "WsConnectAuthorizer", ws_connect_authorizer_fn,
+    identity_source=["route.request.querystring.token"],   # browsers can't set headers
+)
 
 ws = apigwv2.WebSocketApi(
     self, "WebSocketApi",
     api_name="{project_name}-ws",
     connect_route_options=apigwv2.WebSocketRouteOptions(
         integration=integrations.WebSocketLambdaIntegration("ConnectInt", connect_fn),
+        # F-AFIE-19: REQUIRED. Do NOT ship a WebSocket API without this.
+        authorizer=ws_authorizer,
     ),
     disconnect_route_options=apigwv2.WebSocketRouteOptions(
         integration=integrations.WebSocketLambdaIntegration("DisconnectInt", disconnect_fn),
+        # $disconnect runs server-side at session close; no authorizer needed
+        # (the connection ID was already authorized at $connect time).
     ),
     default_route_options=apigwv2.WebSocketRouteOptions(
         integration=integrations.WebSocketLambdaIntegration("DefaultInt", default_fn),
@@ -285,6 +317,77 @@ apigwv2.WebSocketStage(
     web_socket_api=ws, stage_name="v1", auto_deploy=True,
 )
 ```
+
+### 5.1 WebSocket connect authorizer handler — `lambda/ws_connect_authorizer/ws_connect_authorizer.py`
+
+```python
+"""WebSocket $connect Lambda authorizer — validates Cognito JWT from
+querystring.token, returns an IAM policy allowing or denying execute-api:Invoke.
+
+AWS doc payload format:
+https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-lambda-auth.html
+"""
+import json, os, time
+import urllib.request
+from jose import jwk, jwt
+from jose.utils import base64url_decode
+
+_REGION    = os.environ["REGION"]
+_POOL_ID   = os.environ["USER_POOL_ID"]
+_CLIENT_ID = os.environ["USER_POOL_CLIENT_ID"]
+_JWKS_URL  = f"https://cognito-idp.{_REGION}.amazonaws.com/{_POOL_ID}/.well-known/jwks.json"
+_JWKS      = json.loads(urllib.request.urlopen(_JWKS_URL).read())["keys"]
+
+
+def _verify(token: str) -> dict | None:
+    headers = jwt.get_unverified_headers(token)
+    key = next((k for k in _JWKS if k["kid"] == headers["kid"]), None)
+    if not key:
+        return None
+    message, encoded_sig = token.rsplit(".", 1)
+    if not jwk.construct(key).verify(message.encode(), base64url_decode(encoded_sig.encode())):
+        return None
+    claims = jwt.get_unverified_claims(token)
+    if claims["exp"] < time.time():
+        return None
+    if claims.get("aud") != _CLIENT_ID and claims.get("client_id") != _CLIENT_ID:
+        return None
+    return claims
+
+
+def handler(event, _context):
+    token = (event.get("queryStringParameters") or {}).get("token", "")
+    claims = _verify(token)
+    if claims is None:
+        # F-AFIE-19: explicit Deny on bad/missing token. Do NOT return None — that's
+        # treated as Allow by some API GW edge cases. Always emit a policy.
+        return {
+            "principalId": "anonymous",
+            "policyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [{"Action": "execute-api:Invoke",
+                               "Effect": "Deny",
+                               "Resource": event["methodArn"]}],
+            },
+        }
+    return {
+        "principalId": claims["sub"],
+        "policyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{"Action": "execute-api:Invoke",
+                           "Effect": "Allow",
+                           "Resource": event["methodArn"]}],
+        },
+        # Claims forwarded to downstream handlers via $context.authorizer.X
+        "context": {
+            "user_id": claims["sub"],
+            "email":   claims.get("email", ""),
+            "groups":  ",".join(claims.get("cognito:groups", [])),
+        },
+    }
+```
+
+**Client connect URL** (browser-side): `wss://<api-id>.execute-api.<region>.amazonaws.com/v1?token=<cognito-id-jwt>`. The token is short-lived (1h default); on expiry the client must refresh and reconnect — no in-band refresh on a live WebSocket.
 
 ---
 

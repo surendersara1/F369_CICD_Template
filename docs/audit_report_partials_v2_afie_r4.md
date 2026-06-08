@@ -38,7 +38,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 |---|---|---|---|---|
 | 1 | AGENTCORE_RUNTIME | WARN (R2 alpha drift) | F-AFIE-01 (inference-profile/* IAM) ✓ | PASS |
 | 2 | LLMOPS_BEDROCK | WARN (R1) | F-AFIE-01 (3-ARN canonical) ✓ + F-AFIE-02 (§3.0 lifecycle awareness) ✓ + F-AFIE-20 (pricing SoT — pending) | PASS (F-AFIE-01+02); WARN pending F-AFIE-20 |
-| 3 | LAYER_API | WARN (R1 F002 fix never landed) | F-AFIE-03 (R1 fix + default_method_options + AFIE F-INT-01 retro) ✓; F-AFIE-19 (WebSocket $connect auth — pending) | PASS (F-AFIE-03); WARN pending F-AFIE-19 |
+| 3 | LAYER_API | WARN (R1 F002 fix never landed) | F-AFIE-03 (R1 fix + default_method_options + AFIE F-INT-01 retro) ✓ + F-AFIE-19 ($connect WebSocketLambdaAuthorizer + JWT-validating handler + explicit-Deny on bad token + AFIE F-INT-02 retro) ✓ | PASS |
 | 4 | SERVERLESS_HTTP_API_COGNITO | UNAUDITED (R10) | F-AFIE-03 (canonical-pattern intent made explicit + verified default_authorizer mandate) ✓ | PASS |
 | 5 | CDN_CLOUDFRONT_FOUNDATION | UNAUDITED (R17) | F-AFIE-04 (§3.0 TLS pick-one decision tree + G-NEW-05 retro + us-east-1 pin reinforced) ✓ | PASS |
 | 6 | LAYER_FRONTEND | PASS (R1) | F-AFIE-04 (managed SECURITY_HEADERS flagged POC-grade for finance + custom HSTS+CSP cross-ref + TLS pick-one cross-ref) ✓ | PASS |
@@ -716,7 +716,46 @@ Additionally: the canonical `point_in_time_recovery=bool` prop is deprecated as 
 
 ---
 
-### Finding F-AFIE-19 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-19 — HIGH (WebSocket $connect authorization mandatory) — RESOLVED 2026-06-17
+**Partial fixed:** `LAYER_API.md` §5
+
+**Issue (from AFIE Sprint 8 F-INT-02 HIGH):** ms-09 portal stack created a WebSocket API (`apigwv2.WebSocketApi`) without a `$connect` authorizer. The connect_route_options had only an integration, no authorizer parameter. Any client could open `wss://...?token=<anything>` and the connection would be accepted; downstream per-message handlers read `event.requestContext.authorizer.claims` which was empty → identical no-op failure mode as the REST-API F-INT-01 case. Canonical partial §5 demonstrated the WebSocket pattern but omitted the authorizer entirely.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-control-access.html — explicit AWS canonical guidance: "we recommend that you configure an authorizer for the `$connect` route on all your WebSocket APIs. You might need to do this to comply with various compliance frameworks."
+- AWS Security Hub control APIGateway.X (WebSocket authorization) maps directly to this requirement.
+
+**Fix applied:**
+
+1. **§5 preamble** — banner explaining F-AFIE-19 mandate + AFIE F-INT-02 retro + canonical AWS doc URL.
+
+2. **§5 CDK pattern restructured** — added:
+   - `_lambda.Function ws_connect_authorizer_fn` with env vars for USER_POOL_ID + USER_POOL_CLIENT_ID + REGION
+   - `authorizers.WebSocketLambdaAuthorizer` with `identity_source=["route.request.querystring.token"]` (browsers can't set headers on WS upgrade)
+   - `connect_route_options.authorizer=ws_authorizer` — the mandatory addition
+   - `disconnect_route_options` left without authorizer (explicit comment: server-side close; connection ID already authorized at $connect)
+
+3. **§5.1 NEW — full Lambda handler `lambda/ws_connect_authorizer/ws_connect_authorizer.py`**:
+   - JWKS fetch + JWT signature verify via `python-jose`
+   - Exp/aud/client_id validation
+   - **Explicit Deny policy on bad/missing token** (never returns None — comment notes that None is treated as Allow by some API GW edge cases)
+   - Allow policy on valid token, with claims forwarded via `context.{user_id,email,groups}` to downstream message handlers
+
+4. **Client URL pattern** documented: `wss://<api-id>.execute-api.<region>.amazonaws.com/v1?token=<cognito-id-jwt>`. Token is short-lived (1h default); on expiry the client refreshes and reconnects (no in-band refresh on live WS).
+
+**Header bumped:** LAYER_API 2.1 → 2.2.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_websocket_connect_route_has_authorizer` — fails synth if any `AWS::ApiGatewayV2::Route` with `RouteKey: $connect` has `AuthorizationType: NONE`.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-control-access.html (read 2026-06-17) — canonical recommendation + 3 supported mechanisms (IAM, Tags, Lambda authorizers)
+- https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-lambda-auth.html (cited inline) — Lambda REQUEST authorizer payload format
+
+**grep -r sweep (deferred to Tier 8):** scan for any `WebSocketApi` construct without `authorizer=` in `connect_route_options` across `partials/`, `kits/`, `templates/composite/`.
+
+---
+
+### Finding F-AFIE-20 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
