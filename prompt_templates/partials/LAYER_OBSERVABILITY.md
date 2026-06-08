@@ -1,6 +1,7 @@
 # SOP — Observability Layer (CloudWatch, X-Ray, Logs Insights)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** (F-AFIE-05) §3 + §4 SNS ops topic now uses `self.notifications_key` from `LAYER_SECURITY.md` §3 (the 4th CMK class with cloudwatch+events+sns service-principal grants) instead of a generic data CMK; §4 constructor signature gains `notifications_key: kms.IKey`; inline AWS doc + AFIE F-OBS-02 retro comments added. (F-AFIE-07) All 4 alarms missing `treat_missing_data` now set it explicitly with semantic-aware values (failure rates → NOT_BREACHING; steady-state RDS CPU → BREACHING). Gotcha §3.1 expanded with the canonical 3-row decision table for when to use NOT_BREACHING vs BREACHING vs IGNORE.
 **Applies to:** AWS CDK v2 (Python 3.12+) · CloudWatch Dashboards + Alarms + Log Insights + X-Ray
 
 ---
@@ -46,10 +47,18 @@ from aws_cdk import (
 
 
 def _create_observability(self, stage: str) -> None:
+    # AFIE F-OBS-02: master_key alone is NOT sufficient. The CMK's key policy
+    # MUST also grant `kms:GenerateDataKey*` + `kms:Decrypt` to
+    # `cloudwatch.amazonaws.com` (alarm action encrypts the message) and
+    # `sns.amazonaws.com`. Use `self.notifications_key` from LAYER_SECURITY §3
+    # which is pre-grants those service principals; reusing self.kms_key (data
+    # CMK) here will silently fail alarm publish unless that key was also
+    # pre-grants the cloudwatch principal. AWS doc:
+    # https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services
     self.ops_topic = sns.Topic(
         self, "OpsAlerts",
         topic_name=f"{{project_name}}-ops-{stage}",
-        master_key=self.kms_key,
+        master_key=self.notifications_key,    # NOT self.kms_key
     )
 
     # -- Metric filters — turn structured log events into custom metrics -----
@@ -84,6 +93,11 @@ def _create_observability(self, stage: str) -> None:
         threshold=1,
         evaluation_periods=1,
         comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        # F-AFIE-07: ALWAYS set treat_missing_data. Default is MISSING which
+        # flaps the alarm to INSUFFICIENT_DATA on sparse data and Bedrock
+        # consumers won't get paged on real DLQ growth. NOT_BREACHING means
+        # "no data = no DLQ = good"; flip to BREACHING for paranoia mode.
+        treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
     ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
 
     # -- Dashboard -----------------------------------------------------------
@@ -116,6 +130,11 @@ def _create_observability(self, stage: str) -> None:
 - **`metric_errors()` etc. are L2 helpers** that assume the Lambda's default CW namespace. Custom Lambda metrics emitted via Powertools live in a different namespace — reference them explicitly via `cw.Metric(namespace=..., metric_name=...)`.
 - **Composite alarms** (any of N breaches → page) are built with `cw.CompositeAlarm`.
 - **Log retention forever**: not possible; max 10 years. For compliance archiving, subscribe a log group to Kinesis Firehose → S3 Glacier (see `OPS_ADVANCED_MONITORING`).
+- **SNS topic CMK choice (F-AFIE-05)** — `master_key` on `sns.Topic` is necessary but not sufficient. The CMK's key policy MUST also grant `kms:GenerateDataKey*` + `kms:Decrypt` to `cloudwatch.amazonaws.com` (CW alarm encrypts the message before publish) and `sns.amazonaws.com`. Use `self.notifications_key` from `LAYER_SECURITY.md` §3 which pre-grants those service principals; reusing a generic data CMK that lacks those grants will silently fail every alarm → page → zero pages delivered (AFIE Sprint 8 F-OBS-02). AWS doc: https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services.
+- **`treat_missing_data` is MANDATORY on every alarm (F-AFIE-07)** — default is `MISSING` which flaps to INSUFFICIENT_DATA on sparse data and you stop getting paged. Pick the right value per alarm semantic:
+  - Error/failure rate (Lambda errors, SFN failures, DLQ depth): `NOT_BREACHING` — no data = no failures = good
+  - Steady-state metric whose absence means the service is down (RDS CPU, Aurora connections, OpenSearch search latency): `BREACHING` — page on absence
+  - Cost / quota metric: `NOT_BREACHING` typically; `IGNORE` if you only care about active spikes
 
 ---
 
@@ -135,6 +154,7 @@ from aws_cdk import (
     aws_rds as rds,
     aws_stepfunctions as sfn,
     aws_logs as logs,
+    aws_kms as kms,
 )
 from constructs import Construct
 
@@ -147,13 +167,19 @@ class ObservabilityStack(cdk.Stack):
         state_machine: sfn.IStateMachine,
         queues: dict[str, sqs.IQueue],
         rds_instance: rds.IDatabaseInstance,
+        notifications_key: kms.IKey,                        # F-AFIE-05 — from SecurityStack
         **kwargs,
     ) -> None:
         super().__init__(scope, "{project_name}-observability", **kwargs)
 
+        # F-AFIE-05: notifications_key carries the cloudwatch+events+sns
+        # service-principal grants required for CW alarm SNS actions to
+        # encrypt messages. Pass it in via constructor (see signature below).
+        # MUST NOT use a generic "data" CMK that lacks those grants.
         self.ops_topic = sns.Topic(
             self, "OpsAlerts",
             topic_name="{project_name}-ops-alerts",
+            master_key=notifications_key,
         )
 
         # Alarms — built from upstream metric ARNs (no mutation)
@@ -174,6 +200,7 @@ class ObservabilityStack(cdk.Stack):
             metric=state_machine.metric_failed(period=Duration.minutes(5)),
             threshold=1, evaluation_periods=1,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,    # F-AFIE-07
         ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
 
         # DLQ depth alarms (one per queue whose name ends with 'dlq')
@@ -185,6 +212,7 @@ class ObservabilityStack(cdk.Stack):
                     metric=q.metric_approximate_number_of_messages_visible(),
                     threshold=1, evaluation_periods=1,
                     comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                    treat_missing_data=cw.TreatMissingData.NOT_BREACHING,    # F-AFIE-07
                 ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
 
         # RDS CPU alarm
@@ -194,6 +222,9 @@ class ObservabilityStack(cdk.Stack):
             metric=rds_instance.metric_cpu_utilization(period=Duration.minutes(5)),
             threshold=80, evaluation_periods=3,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            # F-AFIE-07: RDS CPU is steady-state metric; missing data here
+            # almost certainly means the DB is down. Treat as BREACHING — page on it.
+            treat_missing_data=cw.TreatMissingData.BREACHING,
         ).add_alarm_action(cw_actions.SnsAction(self.ops_topic))
 
         # Dashboard

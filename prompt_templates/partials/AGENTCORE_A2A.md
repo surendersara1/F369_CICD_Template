@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore A2A (Agent-to-Agent Protocol Server & Client)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` alongside `foundation-model/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** `strands-agents` ≥ 0.1 · `a2a-sdk` ≥ 0.1 · `starlette` / `uvicorn` · AWS CDK v2 (Python 3.12+) · AgentCore Runtime (`ProtocolType.HTTP`) or Fargate for hosting · Python 3.13 container · ARM64
 
 ---
@@ -154,7 +155,13 @@ def _create_a2a_runtime(self, vpc: ec2.IVpc, agents_root: Path) -> Runtime:
     )
     exec_role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # Cross-region inference profiles need inference-profile/* AND foundation-model/* together.
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
 
     artifact = AgentRuntimeArtifact.from_asset(
@@ -242,7 +249,13 @@ class A2AGovernanceStack(cdk.Stack):
         )
         exec_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-            resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # Cross-region inference profiles need inference-profile/* AND foundation-model/* together.
+            resources=[
+                f"arn:aws:bedrock:*::foundation-model/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+            ],
         ))
         iam.PermissionsBoundary.of(exec_role).apply(permission_boundary)
 

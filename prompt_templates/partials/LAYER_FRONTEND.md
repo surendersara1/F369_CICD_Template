@@ -1,6 +1,7 @@
 # SOP — Frontend Layer (S3 + CloudFront + OAC)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** §3.1 gotchas reinforced: (1) managed `SECURITY_HEADERS` is POC-grade — for finance/regulated apps, roll a custom `cf.ResponseHeadersPolicy` per `CDN_CLOUDFRONT_FOUNDATION.md` §3 (HSTS 2y + includeSubDomains + preload + CSP); (2) us-east-1 ACM doc URL cited inline; (3) TLS pick-one-path cross-ref to `CDN_CLOUDFRONT_FOUNDATION.md` §3.0 per AFIE Sprint 11 G-NEW-05.
 **Applies to:** AWS CDK v2 (Python 3.12+) · React / Vite SPA build artifacts
 
 ---
@@ -114,8 +115,9 @@ def _create_frontend(self, stage: str) -> None:
 
 - **`S3BucketOrigin.with_origin_access_control`** auto-writes a bucket policy statement. Works fine in monolith (same stack).
 - **`BucketDeployment`** needs local Docker or `use_efs=False`. Size ≤ 512 MB.
-- **`response_headers_policy=SECURITY_HEADERS`** applies a managed policy; customize via `cf.ResponseHeadersPolicy` to add CSP.
-- **Custom domain certificate** MUST be in `us-east-1` for CloudFront, regardless of your app region.
+- **`response_headers_policy=SECURITY_HEADERS`** applies an AWS-managed policy. It DOES include HSTS, but only `max-age=31536000` (1y) with NO `includeSubDomains` / NO `preload`, and NO Content-Security-Policy. **For finance / auth-bearing / regulated apps (the AFIE-CPG class), roll a custom `cf.ResponseHeadersPolicy` per the canonical example in `CDN_CLOUDFRONT_FOUNDATION.md` §3 lines 203-215** — `max-age=63072000` + `include_subdomains=True` + `preload=True` + explicit CSP. The managed policy is the POC default, not the production default. *(R4 / F-AFIE-04)*
+- **Custom domain certificate** MUST be in `us-east-1` for CloudFront, regardless of your app region. AWS doc: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html#https-requirements-aws-region.
+- **TLS pick-one-path** — if a downstream stack adds an ALB origin (e.g., ECS variant via `LAYER_BACKEND_ECS`), pick exactly one TLS termination path per `CDN_CLOUDFRONT_FOUNDATION.md` §3.0 table. Mixing edge-only TLS with ALB-side HTTP→HTTPS redirect broke AFIE-CPG Sprint 11 G-NEW-05. *(R4 / F-AFIE-04)*
 
 ---
 

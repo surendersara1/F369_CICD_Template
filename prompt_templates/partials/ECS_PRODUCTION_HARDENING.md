@@ -1,6 +1,7 @@
 # SOP — ECS Production Hardening (task IAM least-priv · auto-scaling · GuardDuty Runtime · ECR Inspector · network · secrets · Container Insights)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-27 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-15):** §9 gotcha added codifying the stage-tuned FARGATE_SPOT mix canonical pattern + AFIE F-FIN-06 retro ($420/mo → $120/mo). The CDK code lives in `LAYER_BACKEND_ECS.md`; this partial holds the production-hardening rationale.
 **Applies to:** AWS CDK v2 (Python 3.12+) · ECS task IAM hardening · Service auto-scaling (target tracking + step + scheduled) · GuardDuty Runtime Monitoring for ECS · ECR enhanced scan + Inspector · Networking — VPC + private endpoints · Secrets Manager + Parameter Store · Container Insights v2 alarms · App Runner alternative for tiny services
 
 ---
@@ -436,6 +437,7 @@ task_def.add_container("api",
 - **Secrets injected via task definition** = visible in `aws ecs describe-task` only as ARNs (good); but env vars are visible in CW Logs if app prints them. NEVER print secrets to stdout.
 - **Secrets Manager rotation breaks if app caches creds for > rotation interval** — apps must re-fetch on connection failure.
 - **App Runner has fewer config knobs** than ECS — choose for true zero-ops apps; switch to ECS when complexity grows.
+- **R4 / F-AFIE-15: stage-tuned FARGATE_SPOT mix is canonical** — `LAYER_BACKEND_ECS.md` §3 + §4 wire the strategy as dev: SPOT 9 + base-0 (any task type can be Spot), staging: SPOT 5 + FARGATE base=1, prod: SPOT 3 + FARGATE base=1. AFIE Sprint 10 F-FIN-06 retro: ms-09 dev ran 100% on-demand FARGATE for 8 weeks (~$420/mo) when SPOT-heavy mix would have been ~$120/mo. Spot interruption rates in AFIE deploy region were <2% — tolerable for any non-prod workload. For prod, keep `base=1` on-demand to survive a Spot-eviction wave.
 
 ---
 

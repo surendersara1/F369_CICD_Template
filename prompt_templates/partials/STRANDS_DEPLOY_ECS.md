@@ -1,6 +1,7 @@
 # SOP — Strands Deploy to AgentCore Runtime (and Fargate fallback)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` alongside `foundation-model/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · `aws-cdk-lib.aws-bedrock-agentcore-alpha` · ECS Fargate arm64 · Python 3.13 · Strands SDK v1.34+ · AgentCore SDK v1.6+
 
 ---
@@ -147,7 +148,13 @@ def _create_observer_runtime(self, vpc: ec2.IVpc) -> Runtime:
     # L2 grants — SAFE in monolith (same stack owns agent_role)
     self.agent_role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # Cross-region inference profiles (us./global. prefix) require inference-profile/* AND foundation-model/* together.
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
     self.agent_role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock-agentcore:InvokeGateway"],
@@ -253,7 +260,13 @@ _AGENTS_ROOT: Path = Path(__file__).resolve().parents[3] / "agents"
 def _bedrock_model_grant(role: iam.IRole) -> None:
     role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources=[f"arn:aws:bedrock:{Aws.REGION}::foundation-model/*"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # Cross-region inference profiles (us./global. prefix) require inference-profile/* AND foundation-model/* together.
+        resources=[
+            f"arn:aws:bedrock:*::foundation-model/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+            f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+        ],
     ))
 
 

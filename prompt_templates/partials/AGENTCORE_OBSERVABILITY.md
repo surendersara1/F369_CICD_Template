@@ -1,6 +1,7 @@
 # SOP — Bedrock AgentCore Observability (Token Tracking, Eval, Drift, Dashboards)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** (F-AFIE-06) Canary-evaluator log retention bumped ONE_MONTH → ONE_YEAR in both §3 + §4 — agent-canary logs are the primary forensic record for behavioral-drift investigations and are routinely subpoenaed during regulator review. For SOX/HIPAA, bump further to TWO_YEARS via per-class override.
 **Applies to:** AWS CDK v2 (Python 3.12+) · CloudWatch Dashboards / Alarms / Logs · X-Ray Groups · SNS · DynamoDB (token records) · `bedrock-agentcore` Evaluations API · Python 3.13 Lambda canary
 
 ---
@@ -117,9 +118,14 @@ def _create_observability(self, cmk: kms.IKey) -> None:
     eval_alarm.add_alarm_action(cw_actions.SnsAction(drift_topic))
 
     # Canary evaluator Lambda (behavioral fingerprinting — nightly)
+    # F-AFIE-06: agent-canary logs need LONGER retention than typical app logs —
+    # they're the primary forensic record for behavioral-drift investigations and
+    # are routinely subpoenaed during regulator review. Override per-compliance-class
+    # (see LAYER_BACKEND_LAMBDA §3 _RETENTION_BY_CLASS); never less than ONE_YEAR
+    # for any prod tier. Default below is ONE_YEAR; bump to TWO_YEARS for SOX/HIPAA.
     canary_log = logs.LogGroup(self, "CanaryLogs",
         log_group_name="/aws/lambda/{project_name}-canary-evaluator",
-        retention=logs.RetentionDays.ONE_MONTH,
+        retention=logs.RetentionDays.ONE_YEAR,
     )
     _lambda.Function(self, "CanaryEvaluatorFn",
         function_name="{project_name}-canary-evaluator",
@@ -353,9 +359,10 @@ class ObservabilityStack(cdk.Stack):
         # ... (condensed; see §3.1 for identical pattern)
 
         # Canary evaluator Lambda
+        # F-AFIE-06: agent-canary logs are forensic record; ONE_YEAR minimum for prod.
         canary_log = logs.LogGroup(self, "CanaryLogs",
             log_group_name="/aws/lambda/{project_name}-canary-evaluator",
-            retention=logs.RetentionDays.ONE_MONTH,
+            retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
         self.canary_fn = _lambda.Function(self, "CanaryEvaluatorFn",

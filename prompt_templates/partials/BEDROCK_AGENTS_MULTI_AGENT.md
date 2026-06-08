@@ -1,6 +1,7 @@
 # SOP — Bedrock Agents Multi-Agent Collaboration (supervisor + collaborators · action groups · KB integration · session state · custom orchestration)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-27 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock Agents · Multi-Agent Collaboration (GA Dec 2024) · Action Groups (Lambda + OpenAPI schema) · Knowledge Base association · Session state + memory · Custom orchestration via promptOverride · Code Interpreter action group · Return of control (ROC) + Confirmation flow
 
 ---
@@ -147,8 +148,13 @@ class BedrockAgentStack(Stack):
         # Invoke Bedrock model
         agent_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # Cross-region inference profiles (us./global. prefix) need their own ARN class.
+            # See LLMOPS_BEDROCK §3.1 for the canonical 3-ARN pattern.
             resources=[
                 f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
+                f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                f"arn:aws:bedrock:*:{self.account}:application-inference-profile/*",
             ],
         ))
         # Invoke action group Lambda

@@ -1,6 +1,7 @@
 # SOP — SageMaker Canvas (no-code ML for citizen data scientists · AutoML · JumpStart UI · forecast/classify/regress)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-16 · **Status:** Active
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). Flagged `anthropic.claude-3-*` reference as Bedrock LEGACY — consumers should swap to claude-sonnet-4-5/claude-haiku-4-5 (Active). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html + https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · SageMaker Canvas (GA, ongoing 2024-2026 enhancements) · AutoML behind the scenes (formerly Autopilot) · JumpStart UI · Time-series forecasting · Tabular classification / regression · Foundation models for text generation · Generative AI Q&A on uploaded data · Model deployment to SageMaker endpoint
 
 ---
@@ -143,9 +144,15 @@ def _enable_canvas_in_domain(self, stage: str) -> None:
     )
     self.bedrock_invoke_role.add_to_policy(iam.PolicyStatement(
         actions=["bedrock:InvokeModel"],
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        # WARNING: `anthropic.claude-3-*` is now Bedrock LEGACY (since 2026-04-14, EOL 2026-10-14).
+        # Consumers should swap to `anthropic.claude-sonnet-4-5-*` / `anthropic.claude-haiku-4-5-*`
+        # (Active) before the next deploy. See LLMOPS_BEDROCK §3.1 for current Active models.
         resources=[
             f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-text-*",
-            f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-*",
+            f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-*",  # Legacy — swap to claude-sonnet-4-5/claude-haiku-4-5
+            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+            f"arn:aws:bedrock:*:{self.account}:application-inference-profile/*",
         ],
     ))
 

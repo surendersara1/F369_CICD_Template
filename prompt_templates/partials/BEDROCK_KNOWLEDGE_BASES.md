@@ -1,6 +1,9 @@
 # SOP — Bedrock Knowledge Bases (chunking strategies · vector store options · hybrid search · metadata filters · multi-tenant · citations)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-27 · **Status:** Active
+**Version:** 2.3 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-10 + F-AFIE-18 reconciliation):** §3.1 OpenSearch variant network policy now requires `source_vpce_ids` for non-dev `compliance_class`; the legacy `AllowFromPublic: True` is fenced to dev-only via assertion. Aligns with `DATA_OPENSEARCH_SERVERLESS.md` §3 (F-AFIE-10).
+**R4 update (2026-06-17, F-AFIE-18):** Added Amazon S3 Vectors as the NEW canonical default for cost-sensitive RAG (≤ ~50K vectors, semantic-only). §2 decision tree restructured with explicit "switch to OpenSearch when..." criteria + AFIE F-FIN-08 retro (OpenSearch idle floor ~$700/mo → S3 Vectors ~$2/mo for the same 5K-vector workload). §3.0a NEW — full CDK pattern for `BedrockKbS3VectorsStack` (vector bucket + index + KB execution role with scoped s3vectors:* grants + KB with `storage_configuration.type=S3_VECTORS`). Verified live via canonical doc + CFN template ref + AFIE F-DATA-05 retro on hierarchical-chunking-vs-metadata-limit (5-level config dropped 8% of chunks).
+**R4 update (2026-06-16):** Bedrock InvokeModel grants now include `inference-profile/*` + `application-inference-profile/*` (closes AFIE Sprint 10 G-NEW-01 systemic gap). Embedding/parsing/rerank `model_arn=` references in `CfnDataSource`/`Retrieve` API calls are unchanged (those take specific foundation-model ARNs — not affected by the inference-profile gap). AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock Knowledge Bases (GA Nov 2023) · Vector store options: OpenSearch Serverless / Aurora PostgreSQL pgvector / Pinecone / Redis Cloud / MongoDB Atlas / Neptune Analytics · Chunking strategies: default + fixed + hierarchical + semantic + custom Lambda · Hybrid search (BM25 + vector) · Metadata filters · Multi-tenant via filters · Generation models: Claude / Llama / Mistral · Citations + retrieval-only API
 
 ---
@@ -23,18 +26,28 @@ When the SOW signals: "RAG pipeline", "knowledge base for chatbot", "Bedrock KB 
 
 ## 2. Decision tree — vector store + chunking
 
-### Vector store selection
+### Vector store selection (F-AFIE-18 updated 2026-06-17)
 
-| Vector store | Best for | RPS | Cost | Filter support |
-|---|---|---|---|---|
-| **OpenSearch Serverless (VECTORSEARCH)** | Default; AWS-native; tag-based filters | 1000+ | $$ ($350/mo min) | ✅ rich |
-| **Aurora PostgreSQL + pgvector** | Already have Aurora; exact recall via IVFFlat/HNSW | 100s | $ at scale | ✅ SQL filters |
-| **Pinecone** | Specialized; sparse/dense; namespaces for multi-tenant | 1000s | $$$ | ✅ namespaces |
-| **MongoDB Atlas** | Already on MongoDB; integrated workflow | 100s | $$ | ✅ |
-| **Redis Cloud (Enterprise)** | Sub-ms latency; in-memory | 10K+ | $$$ | ⚠️ |
-| **Amazon Neptune Analytics** | GraphRAG (relationships matter) | 100s | $$ | ✅ |
+| Vector store | Best for | RPS | Cost | Hybrid search | Metadata cap |
+|---|---|---|---|---|---|
+| **Amazon S3 Vectors** | **NEW default for cost-sensitive RAG;** 100ms warm latency; small vector counts (≤ ~5K-50K typical) | 10s-100s | **$ (~$0.02/GB/mo storage + $0.0004/query)** | ❌ semantic-only | 1 KB total / 35 keys per vector |
+| **OpenSearch Serverless (VECTORSEARCH)** | Hybrid search (BM25 + vector); rich metadata; sub-10ms latency | 1000+ | $$ ($350-$700/mo idle floor — 2 OCU min) | ✅ BM25 + vector | rich (KB-scale) |
+| **Aurora PostgreSQL + pgvector** | Already have Aurora; exact recall via IVFFlat/HNSW | 100s | $ at scale | ⚠️ via SQL | rich |
+| **Pinecone** | Specialized; sparse/dense; namespaces for multi-tenant | 1000s | $$$ | ✅ | ✅ namespaces |
+| **MongoDB Atlas** | Already on MongoDB; integrated workflow | 100s | $$ | ⚠️ | ✅ |
+| **Redis Cloud (Enterprise)** | Sub-ms latency; in-memory | 10K+ | $$$ | ⚠️ | ⚠️ |
+| **Amazon Neptune Analytics** | GraphRAG (relationships matter) | 100s | $$ | ✅ | ✅ |
 
-**Default recommendation: OpenSearch Serverless VECTORSEARCH** — managed, tag filters, AWS-native auth, scales horizontally.
+**Default recommendation (R4): Amazon S3 Vectors** — for cost-sensitive RAG with ≤ ~50K vectors and semantic-only search. The 2 OCU OpenSearch Serverless idle floor (~$350-$700/mo) doesn't make sense for the typical 35-document KB; S3 Vectors at <$1/mo for the same workload + acceptable 100ms warm latency is the new canonical default.
+
+**Switch to OpenSearch Serverless VECTORSEARCH when ANY of these apply:**
+- You need hybrid search (BM25 keyword + dense-vector blended scoring) — S3 Vectors is **semantic-only**.
+- You have > 50K vectors OR vector growth is unbounded — S3 Vectors metadata limits become a concern at scale.
+- Latency budget is < 50ms p50 — S3 Vectors is 100ms warm / sub-second cold, OpenSearch is < 10ms.
+- You need > 1 KB metadata per vector OR > 35 metadata keys — S3 Vectors limits.
+- Hierarchical chunking with deep parent-child trees — the hierarchical context lands in non-filterable metadata and can exceed the 1 KB cap.
+
+**AFIE F-FIN-08 retro:** AFIE-CPG used OpenSearch Serverless with 2 collections (~5K vectors total — 35 SOP docs + anomaly history). OpenSearch idle floor was $700/mo; the same workload on S3 Vectors would have been ~$2/mo. Re-pointing the existing KB at S3 Vectors requires re-ingestion (no in-place migration; the embedding format is compatible but the index is not).
 
 ### Chunking strategy
 
@@ -98,6 +111,153 @@ Architecture:
 
 ## 3. Monolith Variant — KB + S3 + OpenSearch Serverless
 
+> **R4 update note (F-AFIE-18):** for cost-sensitive RAG with ≤ ~50K vectors and semantic-only search, prefer the **S3 Vectors variant** in §3.0a below — it's the new canonical default per the decision tree in §2. The OpenSearch Serverless variant in §3.1 remains the right choice for hybrid search, low-latency, or rich-metadata workloads.
+
+### 3.0a Variant — KB + S3 Vectors (NEW canonical default for cost-sensitive RAG)
+
+**When to use:** ≤ ~50K vectors, semantic-only search, 100ms warm latency acceptable, ≤ 1 KB metadata per chunk. This displaces the OpenSearch Serverless 2-OCU idle floor (~$350-$700/mo) with S3 Vectors at ~$0.02/GB/mo storage + $0.0004/query. AFIE-CPG-class engagement: ~$700/mo → ~$2/mo for the same RAG workload.
+
+```python
+# stacks/bedrock_kb_s3vectors_stack.py
+from aws_cdk import Stack, RemovalPolicy, Aws
+from aws_cdk import aws_bedrock as bedrock
+from aws_cdk import aws_s3vectors as s3v          # new module (CDK 2025+)
+from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_iam as iam
+from aws_cdk import aws_kms as kms
+from constructs import Construct
+
+
+class BedrockKbS3VectorsStack(Stack):
+    """KB backed by S3 Vectors — cost-optimized, semantic-only retrieval.
+    F-AFIE-18 canonical default for ≤ ~50K vectors. AFIE F-FIN-08 retro:
+    OpenSearch Serverless idle floor was ~$700/mo for a 5K-vector workload;
+    S3 Vectors is ~$2/mo for the same data.
+    AWS doc: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-bedrock-kb.html
+    """
+    def __init__(self, scope: Construct, id: str, *,
+                 env_name: str, source_bucket: s3.IBucket, kms_key: kms.IKey,
+                 **kwargs):
+        super().__init__(scope, id, **kwargs)
+
+        # ── 1. Vector bucket — S3 Vectors storage tier ───────────────
+        vector_bucket = s3v.CfnVectorBucket(self, "VectorBucket",
+            vector_bucket_name=f"{env_name}-kb-vectors",
+            encryption_configuration=s3v.CfnVectorBucket.EncryptionConfigurationProperty(
+                sse_type="aws:kms",
+                kms_key_arn=kms_key.key_arn,
+            ),
+        )
+
+        # ── 2. Vector index inside the bucket ────────────────────────
+        vector_index = s3v.CfnIndex(self, "VectorIndex",
+            vector_bucket_name=vector_bucket.vector_bucket_name,
+            index_name=f"{env_name}-kb-index",
+            data_type="float32",                # binary not supported with KB
+            dimension=1024,                     # match Titan v2 / Cohere embed v3
+            distance_metric="cosine",
+            # Metadata budget: 1 KB total, max 35 keys per vector. Plan accordingly.
+            metadata_configuration=s3v.CfnIndex.MetadataConfigurationProperty(
+                non_filterable_metadata_keys=["text", "source_uri"],
+            ),
+        )
+        vector_index.add_dependency(vector_bucket)
+
+        # ── 3. KB execution role — least-privilege for S3 Vectors ────
+        kb_role = iam.Role(self, "KbRole",
+            assumed_by=iam.ServicePrincipal("bedrock.amazonaws.com",
+                conditions={"StringEquals": {"aws:SourceAccount": Aws.ACCOUNT_ID}},
+            ),
+        )
+        # Bedrock InvokeModel — canonical 3-ARN pattern (F-AFIE-01)
+        kb_role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeModel"],
+            resources=[
+                f"arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:inference-profile/*",
+                f"arn:aws:bedrock:*:{Aws.ACCOUNT_ID}:application-inference-profile/*",
+            ],
+        ))
+        source_bucket.grant_read(kb_role)
+        # S3 Vectors access — scoped to this vector bucket + index only.
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/kb-permissions.html#kb-permissions-s3vectors
+        kb_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "s3vectors:PutVectors",
+                "s3vectors:GetVectors",
+                "s3vectors:QueryVectors",
+                "s3vectors:DeleteVectors",
+                "s3vectors:ListVectors",
+                "s3vectors:DescribeIndex",
+            ],
+            resources=[
+                f"arn:aws:s3vectors:{Aws.REGION}:{Aws.ACCOUNT_ID}:bucket/{vector_bucket.vector_bucket_name}",
+                f"arn:aws:s3vectors:{Aws.REGION}:{Aws.ACCOUNT_ID}:bucket/{vector_bucket.vector_bucket_name}/index/{vector_index.index_name}",
+            ],
+        ))
+
+        # ── 4. Knowledge Base — storage_configuration type=S3_VECTORS ──
+        kb = bedrock.CfnKnowledgeBase(self, "KnowledgeBase",
+            name=f"{env_name}-kb",
+            description=f"{env_name} RAG KB backed by S3 Vectors",
+            role_arn=kb_role.role_arn,
+            knowledge_base_configuration=bedrock.CfnKnowledgeBase.KnowledgeBaseConfigurationProperty(
+                type="VECTOR",
+                vector_knowledge_base_configuration=bedrock.CfnKnowledgeBase.VectorKnowledgeBaseConfigurationProperty(
+                    embedding_model_arn=f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-embed-text-v2:0",
+                    embedding_model_configuration=bedrock.CfnKnowledgeBase.EmbeddingModelConfigurationProperty(
+                        bedrock_embedding_model_configuration=bedrock.CfnKnowledgeBase.BedrockEmbeddingModelConfigurationProperty(
+                            dimensions=1024,
+                            embedding_data_type="FLOAT32",
+                        ),
+                    ),
+                ),
+            ),
+            storage_configuration=bedrock.CfnKnowledgeBase.StorageConfigurationProperty(
+                type="S3_VECTORS",
+                s3_vectors_configuration=bedrock.CfnKnowledgeBase.S3VectorsConfigurationProperty(
+                    vector_bucket_arn=vector_bucket.attr_arn,
+                    index_arn=vector_index.attr_arn,
+                    index_name=vector_index.index_name,
+                ),
+            ),
+        )
+        kb.add_dependency(vector_index)
+
+        # ── 5. Data source — S3 with chunking ─────────────────────────
+        # IMPORTANT: hierarchical chunking with deep parent-child trees can
+        # blow past the 1 KB per-vector metadata cap. Default or fixed-size
+        # chunking is safer with S3 Vectors. AFIE F-DATA-05 retro: ms-09's
+        # 5-level hierarchical config silently dropped 8% of chunks at ingestion
+        # time because parent context exceeded metadata size limit.
+        bedrock.CfnDataSource(self, "S3DataSource",
+            knowledge_base_id=kb.attr_knowledge_base_id,
+            name=f"{env_name}-s3-source",
+            data_source_configuration=bedrock.CfnDataSource.DataSourceConfigurationProperty(
+                type="S3",
+                s3_configuration=bedrock.CfnDataSource.S3DataSourceConfigurationProperty(
+                    bucket_arn=source_bucket.bucket_arn,
+                ),
+            ),
+            vector_ingestion_configuration=bedrock.CfnDataSource.VectorIngestionConfigurationProperty(
+                chunking_configuration=bedrock.CfnDataSource.ChunkingConfigurationProperty(
+                    chunking_strategy="FIXED_SIZE",     # safer than HIERARCHICAL with S3 Vectors
+                    fixed_size_chunking_configuration=bedrock.CfnDataSource.FixedSizeChunkingConfigurationProperty(
+                        max_tokens=300,
+                        overlap_percentage=20,
+                    ),
+                ),
+            ),
+        )
+```
+
+**Limitations to expect (verified live via https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-bedrock-kb.html):**
+- Semantic search ONLY (no hybrid).
+- Floating-point vectors only; no binary embeddings.
+- 1 KB total metadata per vector + 35 keys max.
+- Hierarchical chunking with deep trees risks exceeding metadata limits.
+- No in-place migration from OpenSearch Serverless — re-ingest required.
+
 ### 3.1 CDK
 
 ```python
@@ -139,16 +299,29 @@ class BedrockKbStack(Stack):
                 "KmsARN": kms_key.key_arn,
             }),
         )
+        # F-AFIE-10 + F-AFIE-18 reconciliation: this OpenSearch variant of the BKB
+        # partial inherits the canonical secure default. For non-dev compliance_class
+        # source_vpce_ids is REQUIRED; AllowFromPublic=True is the dev-only fallback.
+        # See DATA_OPENSEARCH_SERVERLESS.md §3 for the matching pattern.
+        assert source_vpce_ids or compliance_class == "dev", (
+            "F-AFIE-10: BKB OpenSearch network policy needs source_vpce_ids for non-dev. "
+            "Pass compliance_class='dev' or source_vpce_ids=[<vpce>...] to OssKbStack."
+        )
+        if compliance_class == "dev" and not source_vpce_ids:
+            net_rules = [{
+                "Rules": [{"ResourceType": "collection", "Resource": [f"collection/{env_name}-kb"]}],
+                "AllowFromPublic": True,
+            }]
+        else:
+            net_rules = [{
+                "Rules": [{"ResourceType": "collection", "Resource": [f"collection/{env_name}-kb"]}],
+                "AllowFromPublic": False,
+                "SourceVPCEs": source_vpce_ids,
+            }]
         oss.CfnSecurityPolicy(self, "OssNetPolicy",
             name=f"{env_name}-kb-net",
             type="network",
-            policy=json.dumps([{
-                "Rules": [
-                    {"ResourceType": "collection",
-                     "Resource": [f"collection/{env_name}-kb"]},
-                ],
-                "AllowFromPublic": True,                       # use VPC for prod
-            }]),
+            policy=json.dumps(net_rules),
         )
         kb_collection = oss.CfnCollection(self, "KbCollection",
             name=f"{env_name}-kb",
@@ -167,8 +340,14 @@ class BedrockKbStack(Stack):
         # Bedrock embedding model invoke
         kb_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
+            # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+            # KB ingestion needs embedding-model access (Titan v2 stays specific) AND, if the
+            # generation models swap to a cross-region inference profile, those ARN classes.
+            # See LLMOPS_BEDROCK §3.1 for the canonical 3-ARN pattern.
             resources=[
                 f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-embed-text-v2:0",
+                f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                f"arn:aws:bedrock:*:{self.account}:application-inference-profile/*",
             ],
         ))
         # OpenSearch Serverless data plane

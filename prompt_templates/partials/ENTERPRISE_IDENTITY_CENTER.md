@@ -1,6 +1,7 @@
 # SOP — AWS IAM Identity Center (SSO · permission sets · ABAC · external IdP federation · group provisioning)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-21):** §6 gotcha added codifying the IDC-vs-Cognito split — IDC for workforce SSO; Cognito for customer identity. Cross-ref to AGENTCORE_IDENTITY §3.3 (the partial where the Cognito feature_plan=PLUS canonical now lives). This is a navigation aid, not a CDK change — IDC partial does not own any Cognito user-pool config.
 **Applies to:** AWS CDK v2 (Python 3.12+) · IAM Identity Center (formerly AWS SSO) · Permission Sets (managed + inline policy + customer-managed) · ABAC via session tags · External IdP federation (Azure AD / Okta / Google Workspace) · SCIM auto-provisioning · Application assignments
 
 ---
@@ -288,6 +289,7 @@ sso.CfnTrustedTokenIssuer(self, "OktaTti",
 - **Identity Center can only run in ONE region per Org.** Choose carefully — it's painful to migrate.
 - **The Identity Center "instance ARN" lives in the Management account.** All Permission Sets + Assignments must be created from there (not from member accounts).
 - **`session_duration` cap is 12h** (PT12H). Default is PT1H for new permission sets.
+- **R4 / F-AFIE-21: don't conflate Identity Center with Cognito.** IDC is the canonical **workforce SSO** layer — employees + contractors + AWS console + CLI + managed apps (Grafana, OS Dashboards). **Cognito user pools** are the canonical **customer identity** layer — external end-users hitting your portal / mobile / SaaS app. They're complementary, not interchangeable. For Cognito user-pool advanced security (adaptive auth + compromised-credentials + threat-protection logs), set `feature_plan=cognito.FeaturePlan.PLUS` per `AGENTCORE_IDENTITY.md` §3.3 (AFIE F-SEC-06 retro). For workforce SSO into AWS services, use IDC permission sets + group assignments per §3.1 + §5.1 here.
 - **`relay_state_type`** — destination URL after sign-in. Helpful for billing/finance flows.
 - **Inline policy size cap: 10 KB.** Use customer-managed policies (referenced by ARN) for larger.
 - **Customer-managed policies must exist in EVERY target account** with the same name. Use StackSets to deploy.

@@ -1,6 +1,7 @@
 # SOP — dbt on Amazon Redshift Serverless (Silver Iceberg → Gold native)
 
-**Version:** 1.0 · **Last-reviewed:** 2026-05-12 · **Status:** Active
+**Version:** 1.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-14):** §14 Pitfalls table gains explicit row codifying the AFIE F-FIN-05 retro: the upstream workgroup partials this composite consumes (MLOPS_DATA_PLATFORM, DATA_LAKEHOUSE_ICEBERG, DATA_ZERO_ETL) MUST set `max_capacity` explicitly. Without it the workgroup auto-scales to 512 RPU with no ceiling — $300+/hr burn during a runaway dbt MERGE.
 **Applies to:** dbt-core ≥ 1.8 (or dbt Cloud) · `dbt-redshift` adapter ≥ 1.8 · Amazon Redshift Serverless · Silver in S3 Tables (Iceberg via Glue federated catalog) · Gold in Redshift native (RMS columnar)
 
 **Validated against AWS docs 2026-05-12.** Redshift Serverless reads S3 Tables via federated `s3tablescatalog` external schema with no Spectrum surcharge.
@@ -594,6 +595,7 @@ CDKTF construct: `infra/constructs/lakehouse_dbt.py` provisions:
 | Power BI report sees stale data | Refresh cadence misaligned; `mv_*` not refreshed | Tighten MV refresh schedule; verify `reporting.vw_*` is the model, not a copy |
 | `dbt test` extremely slow | Tests scanning full Gold history | Add `where` clauses to test configs; for incremental models, test last N days |
 | Redshift workgroup OOM during `dbt build` | RPU max too low; or memory-heavy MERGE | Raise `max_capacity`; profile via `SYS_QUERY_HISTORY` |
+| Redshift workgroup runaway cost during `dbt build` | `max_capacity` NOT SET → auto-scales to 512 RPU + no ceiling | **F-AFIE-14:** the workgroup this partial consumes MUST have `max_capacity` set explicitly in its CDK definition (see `MLOPS_DATA_PLATFORM.md` / `DATA_LAKEHOUSE_ICEBERG.md` / `DATA_ZERO_ETL.md`). AFIE Sprint 10 F-FIN-05 retro: $300+/hr burn during a runaway MERGE before someone killed it. |
 | dbt + Glue Python shell can't find `dbt-redshift` | Wheel not in `--additional-python-modules` | Bake dbt-core + dbt-redshift into the Glue job's modules list |
 | dbt artifacts not visible to operator dashboard | `manifest.json` / `catalog.json` not uploaded post-run | Add S3 upload step at end of Glue dbt job; operator dashboard reads from S3 |
 

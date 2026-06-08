@@ -1,6 +1,9 @@
 # SOP — Security Layer (KMS, IAM Baseline, Permission Boundaries)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 updates (2026-06-17):**
+- (F-AFIE-05) Added 4th canonical CMK class `self.notifications_key` (SNS ops topic encryption + CW alarm action compatibility) in both §3 Monolith and §4 Micro-Stack. Three service principals required on the key policy: `cloudwatch.amazonaws.com` (CW alarms encrypting via SNS), `events.amazonaws.com` (EventBridge → SNS), `sns.amazonaws.com` (envelope decrypt). AFIE F-OBS-02 retro. AWS doc: https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services.
+- (F-AFIE-09) Added `DenyAgentCoreInvokeAcrossProjects` statement to the permission boundary in both §3 + §4 — defense-in-depth catches cross-project AgentCore `Invoke*` calls when the target resource lacks `aws:ResourceTag/Project = {project_name}`. The role-level wildcard is the upstream bug (fixed in AGENTCORE_IDENTITY F-AFIE-09); this boundary statement is the blast-radius cap. AFIE F-GOV-09 retro: prod orchestrator with `gateway/*` invoked teammate's dev-gateway in the same account.
 **Applies to:** AWS CDK v2 (Python 3.12+)
 
 ---
@@ -58,6 +61,22 @@ def _create_security(self, stage: str) -> None:
     # CloudWatch Logs needs a service principal on the key policy
     self.logs_key.grant_encrypt_decrypt(iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com"))
 
+    # Notifications / monitoring CMK — used by SNS ops topic that receives CW alarm actions.
+    # AFIE Sprint 8 F-OBS-02: CMK-encrypted SNS topic without these service principals on the
+    # key policy → CW alarms fire, kms:GenerateDataKey* DENIED, SNS publish fails silently,
+    # zero pages delivered. Both principals required. AWS doc:
+    # https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services
+    self.notifications_key = kms.Key(
+        self, "NotificationsKey",
+        alias=f"alias/{{project_name}}-notifications-{stage}",
+        enable_key_rotation=True,
+        description="SNS ops topic encryption — CW alarm actions + SES + EventBridge",
+    )
+    for svc in ("cloudwatch.amazonaws.com",     # CW alarm actions encrypting messages
+                "events.amazonaws.com",         # EventBridge rule → SNS targets
+                "sns.amazonaws.com"):           # SNS itself (envelope decrypt for subscribers)
+        self.notifications_key.grant_encrypt_decrypt(iam.ServicePrincipal(svc))
+
     # Permission boundary — every workload role must attach this
     self.permission_boundary = iam.ManagedPolicy(
         self, "WorkloadPermissionBoundary",
@@ -82,6 +101,25 @@ def _create_security(self, stage: str) -> None:
                     "iam:AttachUserPolicy", "iam:CreateLoginProfile",
                 ],
                 resources=["*"],
+            ),
+            # F-AFIE-09: cross-namespace blast radius cap. AFIE Sprint 10 F-GOV-09:
+            # if any consumer ships a per-agent role with InvokeGateway on `gateway/*`,
+            # this DENY catches any cross-project bedrock-agentcore call where the
+            # target resource doesn't carry the project tag. The role-level wildcard
+            # is the upstream bug; this boundary statement is the defense-in-depth.
+            iam.PolicyStatement(
+                sid="DenyAgentCoreInvokeAcrossProjects",
+                effect=iam.Effect.DENY,
+                actions=[
+                    "bedrock-agentcore:InvokeGateway",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:RetrieveMemoryRecords",
+                    "bedrock-agentcore:CreateEvent",
+                ],
+                resources=["*"],
+                conditions={
+                    "StringNotEquals": {"aws:ResourceTag/Project": "{project_name}"}
+                },
             ),
         ],
     )
@@ -150,6 +188,18 @@ class SecurityStack(cdk.Stack):
             iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")
         )
 
+        # Notifications CMK — used by SNS ops topic that receives CW alarm actions.
+        # See §3 monolith for the AFIE F-OBS-02 retro on why CW + EventBridge + SNS principals
+        # are all three required. AWS doc:
+        # https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html#compatibility-with-aws-services
+        self.notifications_key = kms.Key(
+            self, "NotificationsKey",
+            alias="alias/{project_name}-notifications",
+            enable_key_rotation=True,
+        )
+        for svc in ("cloudwatch.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com"):
+            self.notifications_key.grant_encrypt_decrypt(iam.ServicePrincipal(svc))
+
         # Permission boundary. Non-empty (CDK validates).
         self.permission_boundary = iam.ManagedPolicy(
             self, "WorkloadBoundary",
@@ -165,6 +215,18 @@ class SecurityStack(cdk.Stack):
                     sid="DenyIamAdmin", effect=iam.Effect.DENY,
                     actions=["iam:CreateUser", "iam:CreateAccessKey", "iam:PutUserPolicy"],
                     resources=["*"],
+                ),
+                # F-AFIE-09: cross-project AgentCore DENY — see §3 for the AFIE retro.
+                iam.PolicyStatement(
+                    sid="DenyAgentCoreInvokeAcrossProjects", effect=iam.Effect.DENY,
+                    actions=[
+                        "bedrock-agentcore:InvokeGateway",
+                        "bedrock-agentcore:InvokeAgentRuntime",
+                        "bedrock-agentcore:RetrieveMemoryRecords",
+                        "bedrock-agentcore:CreateEvent",
+                    ],
+                    resources=["*"],
+                    conditions={"StringNotEquals": {"aws:ResourceTag/Project": "{project_name}"}},
                 ),
             ],
         )

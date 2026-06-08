@@ -1,6 +1,12 @@
 # SOP — LLMOps (Amazon Bedrock, Prompts, Guardrails, Knowledge Base, Agents)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.3 · **Last-reviewed:** 2026-06-17 · **Status:** Active (CANONICAL for Bedrock InvokeModel ARN shapes + lifecycle awareness + cost-aware routing)
+**R4 update (2026-06-17, F-AFIE-20 — on top of F-AFIE-01+02 from 2026-06-16):** §3.0b NEW — pricing source-of-truth + cost-aware model routing. Documents the authoritative AWS pricing page URL + CUR 2.0 spend reconciliation, the 4 token-type categories (input/output/cache-read/cache-write — partial sums ≠ bill), 3 service tiers (standard/priority/flex), per-model $/M pricing snapshot, cheap-routing pattern (Sonnet for reasoning, Haiku for classification + extraction), SSM-driven model_router helper, per-invoke CW metrics emitter, and pre-deploy cost-check checklist. AFIE Sprint 10 F-FIN-09 retro: ms-09 paid $4,200 in week 6 (vs forecast $1,800) by Sonnet-routing every query including simple classification; cheap-routing would have saved ~60%.
+**R4 update (2026-06-16):**
+- §3.0 NEW — Current Active Models + Lifecycle Awareness subsection with authoritative table (Active vs Legacy/EOL with dates) + mandatory MCP currency-check pattern. Closes AFIE Sprint 8 F-AI-01 (Sonnet 4 EOL 2026-10-14 + offline->15d-may-lose-access risk). [F-AFIE-02]
+- §3.1 + §4 — InvokeModel IAM grants restructured to the canonical 3-ARN pattern (`foundation-model/*` + `inference-profile/*` + `application-inference-profile/*`). Default model bumped from Claude 3 Sonnet/Haiku (Legacy/EOL) to Claude Sonnet 4.5 + Haiku 4.5 (Active). Closes AFIE Sprint 10 G-NEW-01 deploy-blocker. [F-AFIE-01]
+
+AWS docs verified live via MCP: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html + https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · Amazon Bedrock · SSM Parameter Store
 
 ---
@@ -32,6 +38,156 @@ Bedrock resources themselves (model ARNs, Guardrails) aren't IAM-mutatable by co
 
 ## 3. Monolith Variant
 
+### 3.0 Current Active Models + Lifecycle Awareness (mandatory currency check)
+
+**AWS doc (authoritative):** https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
+
+Bedrock models pass through three states: **Active → Legacy → EOL**. Once Legacy is announced, existing customers **may lose access after 15 days of inactivity** — i.e. a deployment that goes offline for two weeks may already be unable to invoke its synthesis model when redeployed. This is the AFIE-CPG Sprint 8 F-AI-01 incident.
+
+**Verify against the AWS doc before every deploy.** The MCP currency-check pattern (per OPS_AWS_SERVICE_CURRENCY_CHECK partial) is:
+
+```
+mcp__awslabs_aws-documentation-mcp-server__read_documentation
+url: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html
+```
+
+#### Active models (as of 2026-06-16, verify before deploy)
+
+| Provider | Model | Bedrock model ID (foundation-model) | Notes |
+|---|---|---|---|
+| Anthropic | Claude Sonnet 4.5 | `anthropic.claude-sonnet-4-5-20250929-v1:0` | Canonical synthesis model |
+| Anthropic | Claude Haiku 4.5 | `anthropic.claude-haiku-4-5-20251001-v1:0` | Canonical fallback (cheaper routing) |
+| Amazon | Titan-embed-text v2 | `amazon.titan-embed-text-v2:0` | Canonical embeddings (1024-dim default) |
+| Amazon | Nova Sonic v2 | `amazon.nova-sonic-v2:0` | Speech (v1 is Legacy — see below) |
+| Cohere | Cohere Rerank v3.5 | `cohere.rerank-v3-5:0` | Reranking for KB |
+
+#### Legacy / EOL — DO NOT use in new partials or new project code
+
+| Model | Legacy date | EOL date | Public extended access from | Replacement |
+|---|---|---|---|---|
+| `anthropic.claude-3-sonnet-20240229-v1:0` | 2026-01-30 | **2026-07-30** (past) | — | claude-sonnet-4-5 |
+| `anthropic.claude-3-haiku-20240307-v1:0` | 2026-03-10 | 2026-09-10 | 2026-06-10 | claude-haiku-4-5 |
+| `anthropic.claude-sonnet-4-20250514-v1:0` | 2026-04-14 | **2026-10-14** | 2026-07-14 | claude-sonnet-4-5 |
+| `amazon.nova-sonic-v1:0` | 2026-03-13 | 2026-09-14 | — | nova-sonic-v2 |
+| `amazon.nova-premier-v1:0` | 2026-03-13 | 2026-09-14 | — | (see model card) |
+| `amazon.titan-image-generator-v2:0` | 2025-12-30 | **2026-06-30** (past) | — | (see model card) |
+
+**Pre-deploy checklist:**
+- [ ] Run the MCP currency-check above; reconcile against the tables here
+- [ ] Grep your project for any literal model ID in the Legacy/EOL table
+- [ ] If any project deployment has been offline >15 days, expect Bedrock access to be revoked on the first Legacy model call — replace the model literal AND re-deploy before testing
+
+**Project-side discipline:** read the synthesis model from SSM (`/{project}/runtime/default_model`), not from a code literal. This makes the model swap a one-line SSM update, not a redeploy. The AFIE-CPG `agents/shared/ssm_helper.py` pattern is canonical.
+
+### 3.0b Pricing source-of-truth + cost-aware model routing (F-AFIE-20)
+
+**Authoritative pricing page (the SoT):** https://aws.amazon.com/bedrock/pricing/
+**Authoritative spend reconciliation (CUR 2.0):** https://docs.aws.amazon.com/bedrock/latest/userguide/cost-mgmt-understanding-cur-data.html
+**MCP currency check (pre-deploy, mandatory):** the pricing page is NOT served by the AWS Documentation MCP server (it's on `aws.amazon.com`, not `docs.aws.amazon.com`). Use a manual fetch as part of the pre-deploy checklist; reconcile against the table below.
+
+**AFIE Sprint 10 F-FIN-09 retro:** ms-09 sent every query — including simple `is_pii(text)?` classification — to Claude Sonnet 4.5 at $3/M input + $15/M output. Week 6 bill was $4,200 vs forecast $1,800. Re-routing classification + extraction to Haiku ($0.80/M input + $4/M output) would have saved ~60% of the bill. Canonical partial had model IDs but offered no pricing context to inform routing decisions.
+
+**Four token-type categories you MUST track (per the CUR doc cited above):**
+
+| Token type | CUR usage type pattern | Notes |
+|---|---|---|
+| Input | `*-input-tokens` | Tokens sent in the request prompt |
+| Output | `*-output-tokens` | Tokens generated in the response (typically 5x input cost) |
+| Cache read | `*-cache-read-input-token-count` | Significantly **cheaper** than input — use prompt caching for repeated context |
+| Cache write | `*-cache-write-input-token-count` | More expensive than input — pays off only on ≥ 2-3 reads of the same prefix |
+
+> ⚠️ AWS canonical guidance: "If you only sum input and output tokens, your totals will not match your bill." Reconcile against all FOUR token types or expect 10-30% drift.
+
+**Three service tiers (impact on price & availability):**
+- **Standard** — default; on-demand pricing as listed.
+- **Priority** — premium ~25% for guaranteed capacity during throttling events; use for prod customer-facing workloads.
+- **Flex** — discounted; best-effort latency; for batch and overnight workloads.
+
+**Per-model on-demand pricing (snapshot as of 2026-06-17 — VERIFY against the SoT URL before every deploy):**
+
+| Model | $/M input tokens | $/M output tokens | When to use |
+|---|---|---|---|
+| `anthropic.claude-sonnet-4-5-20250929-v1:0` | $3.00 | $15.00 | Reasoning, synthesis, multi-step planning |
+| `anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80 | $4.00 | Classification, extraction, routing, simple QA |
+| `amazon.titan-embed-text-v2:0` | $0.02 | n/a (embedding) | Embeddings (1024-dim default) |
+| `cohere.rerank-v3-5:0` | $1.00 per 1K queries | n/a | KB rerank |
+
+**Cost-aware routing pattern — read which model to use from SSM (not from a code literal):**
+
+```python
+# agents/shared/model_router.py — pick model by task class
+from enum import Enum
+import os, boto3
+
+class TaskClass(Enum):
+    REASONING       = "reasoning"        # Sonnet 4.5 — multi-step, synthesis
+    CLASSIFICATION  = "classification"   # Haiku 4.5 — yes/no, label, route
+    EXTRACTION      = "extraction"       # Haiku 4.5 — fields from text
+    EMBEDDING       = "embedding"        # Titan-embed v2
+
+_ssm = boto3.client("ssm")
+_CACHE: dict[TaskClass, str] = {}
+
+
+def model_for(task: TaskClass) -> str:
+    """Read the configured model ID from SSM. Override at runtime via SSM update."""
+    if task in _CACHE:
+        return _CACHE[task]
+    proj = os.environ["PROJECT_NAME"]
+    param = f"/{proj}/runtime/model/{task.value}"
+    model_id = _ssm.get_parameter(Name=param)["Parameter"]["Value"]
+    _CACHE[task] = model_id
+    return model_id
+```
+
+```python
+# infra/stacks/ai_stack.py — publish the routing config as SSM
+ssm.StringParameter(self, "ModelReasoning",
+    parameter_name=f"/{project_name}/runtime/model/reasoning",
+    string_value="anthropic.claude-sonnet-4-5-20250929-v1:0",
+)
+ssm.StringParameter(self, "ModelClassification",
+    parameter_name=f"/{project_name}/runtime/model/classification",
+    string_value="anthropic.claude-haiku-4-5-20251001-v1:0",
+)
+ssm.StringParameter(self, "ModelExtraction",
+    parameter_name=f"/{project_name}/runtime/model/extraction",
+    string_value="anthropic.claude-haiku-4-5-20251001-v1:0",
+)
+```
+
+**Per-invocation cost emission to CloudWatch metrics (so consumers can compute $/query at scale):**
+
+```python
+# agents/shared/bedrock_metrics.py — emit per-invoke token counts
+from aws_lambda_powertools import Metrics
+from aws_lambda_powertools.metrics import MetricUnit
+
+_metrics = Metrics(namespace="{project_name}/Bedrock")
+
+def emit_invoke(model_id: str, task: str, input_tokens: int, output_tokens: int,
+                cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> None:
+    """Emit per-invoke token counts; pair with a CW metric math expression
+    that multiplies by $/token to produce a near-real-time cost graph."""
+    dims = {"ModelId": model_id, "Task": task}
+    for name, n in [
+        ("InputTokens", input_tokens),
+        ("OutputTokens", output_tokens),
+        ("CacheReadTokens", cache_read_tokens),
+        ("CacheWriteTokens", cache_write_tokens),
+    ]:
+        if n > 0:
+            _metrics.add_metric(name=name, unit=MetricUnit.Count, value=n)
+    _metrics.add_dimensions(**dims)
+    _metrics.flush_metrics()
+```
+
+**Pre-deploy cost-check checklist:**
+- [ ] Open https://aws.amazon.com/bedrock/pricing/ and verify the rates in the table above are still current; update the partial if they've drifted.
+- [ ] Confirm CUR 2.0 export is enabled for the AFIE-class workload (per the CUR doc cited above) — otherwise reconciliation is impossible.
+- [ ] Verify the SSM model-routing config (`/{project}/runtime/model/*`) maps every TaskClass to the cheapest model that meets the SLO.
+- [ ] Verify per-invoke metrics are emitted (CW namespace `{project_name}/Bedrock`) so finance can audit $/query trends.
+
 ### 3.1 IAM policies (scoped to exact model ARN)
 
 ```python
@@ -44,20 +200,45 @@ def _create_ai(self, stage: str) -> None:
     account = self.account
 
     # Models this project uses (environment-specific for safety)
-    default_model  = "anthropic.claude-3-sonnet-20240229-v1:0"
-    fallback_model = "anthropic.claude-3-haiku-20240307-v1:0"
+    # CURRENT ACTIVE MODELS as of 2026-06-16 (verify against
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html):
+    #   - Claude Sonnet 4.5 (Active)        | claude-3 Sonnet/Haiku are LEGACY / EOL'd
+    #   - Claude Haiku 4.5 (Active)         |
+    #   - Titan-embed-text v2 (Active)      | v1 is Legacy
+    #   - Nova Sonic v2 (Active)            | v1 is Legacy
+    default_model  = "anthropic.claude-sonnet-4-5-20250929-v1:0"   # Active
+    fallback_model = "anthropic.claude-haiku-4-5-20251001-v1:0"    # Active
+
+    # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+    # The CANONICAL 3-ARN pattern — foundation-model + inference-profile + application-inference-profile.
+    # Cross-region inference profiles (e.g. `us.anthropic.claude-sonnet-4-5-…`,
+    # `global.anthropic.claude-sonnet-4-…`) AccessDenied if only foundation-model/* granted.
+    # Application inference profiles (Bedrock console-created) need their own ARN class too.
+    # This was AFIE-CPG Sprint 10's G-NEW-01 production blocker.
     model_arns = [
+        # Foundation-model ARNs (account-empty `::` is correct — global resource)
         f"arn:aws:bedrock:{region}::foundation-model/{default_model}",
         f"arn:aws:bedrock:{region}::foundation-model/{fallback_model}",
+        # Cross-region inference profile ARNs (account-scoped)
+        f"arn:aws:bedrock:*:{account}:inference-profile/*",
+        # Application inference profiles (Bedrock console-created)
+        f"arn:aws:bedrock:*:{account}:application-inference-profile/*",
     ]
+    # ALTERNATIVE — broader "any active Bedrock model" pattern (use when SSM-driven
+    # model swap is the canonical consumer path; keeps grant stable across model rotations):
+    #   model_arns = [
+    #       f"arn:aws:bedrock:*::foundation-model/*",
+    #       f"arn:aws:bedrock:*:{account}:inference-profile/*",
+    #       f"arn:aws:bedrock:*:{account}:application-inference-profile/*",
+    #   ]
 
-    # Model invocation — scoped to these specific models
+    # Model invocation — scoped per the model_arns list above
     self.bedrock_policy = iam.ManagedPolicy(
         self, "BedrockInvokePolicy",
         managed_policy_name=f"{{project_name}}-bedrock-invoke-{stage}",
         statements=[
             iam.PolicyStatement(
-                sid="InvokeSpecificModels",
+                sid="InvokeBedrockModels",
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=model_arns,
             ),
@@ -156,11 +337,18 @@ class AiStack(cdk.Stack):
         super().__init__(scope, "{project_name}-ai", **kwargs)
 
         region, account = self.region, self.account
-        default_model  = "anthropic.claude-3-sonnet-20240229-v1:0"
-        fallback_model = "anthropic.claude-3-haiku-20240307-v1:0"
+        # See §3.1 for the canonical 3-ARN pattern + current Active model list.
+        # AWS doc: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+        default_model  = "anthropic.claude-sonnet-4-5-20250929-v1:0"   # Active (was claude-3-sonnet — Legacy/EOL)
+        fallback_model = "anthropic.claude-haiku-4-5-20251001-v1:0"    # Active (was claude-3-haiku — Legacy/EOL)
         model_arns = [
+            # Foundation-model ARNs
             f"arn:aws:bedrock:{region}::foundation-model/{default_model}",
             f"arn:aws:bedrock:{region}::foundation-model/{fallback_model}",
+            # Cross-region inference profile ARNs (REQUIRED for us./global. prefixed model IDs)
+            f"arn:aws:bedrock:*:{account}:inference-profile/*",
+            # Application inference profiles (Bedrock console-created)
+            f"arn:aws:bedrock:*:{account}:application-inference-profile/*",
         ]
 
         self.bedrock_policy = iam.ManagedPolicy(

@@ -1,6 +1,7 @@
 # SOP — MLOps Data Platform (Glue, Athena, Lake Formation, Redshift, EMR)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-21 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-14):** `redshift.CfnWorkgroup` now sets `max_capacity` explicitly (64 staging / 256 prod). AFIE Sprint 10 F-FIN-05 retro: ms-09 left max_capacity unset; a runaway dbt MERGE auto-scaled to 512 RPU and burned $300+/hr before someone killed it. AWS doc: https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-billing-on-demand.html#serverless-max-capacity.
 **Applies to:** AWS CDK v2 (Python 3.12+) · S3 data lake (4 zones) · Glue 4.0 (Spark 3.3 / Python 3.10) · Athena · Lake Formation · Redshift Serverless · EMR Serverless 6.15
 
 ---
@@ -247,10 +248,17 @@ if stage_name != "dev":
         kms_key_id=self.kms_key.key_arn,
         log_exports=["userlog", "connectionlog", "useractivitylog"],
     )
+    # F-AFIE-14: MaxCapacity is MANDATORY. AFIE Sprint 10 F-FIN-05: ms-09 left
+    # MaxCapacity unset; a runaway dbt MERGE during staging auto-scaled the
+    # workgroup to 512 RPU and burned $300+ in an hour before someone killed it.
+    # Without MaxCapacity, the workgroup auto-scales WITHOUT a ceiling. Always
+    # set max_capacity per stage. AWS doc:
+    # https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-billing-on-demand.html#serverless-max-capacity
     redshift.CfnWorkgroup(self, "RedshiftWorkgroup",
         workgroup_name=f"{{project_name}}-{stage_name}",
         namespace_name=redshift_namespace.namespace_name,
-        base_capacity=8 if stage_name == "staging" else 32,     # RPUs
+        base_capacity=8 if stage_name == "staging" else 32,     # RPUs (8 = floor)
+        max_capacity=64 if stage_name == "staging" else 256,    # F-AFIE-14 cost cap
         enhanced_vpc_routing=True,
         subnet_ids=[s.subnet_id for s in self.vpc.isolated_subnets],
         security_group_ids=[self.aurora_sg.security_group_id],

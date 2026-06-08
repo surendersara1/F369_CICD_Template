@@ -1,6 +1,7 @@
 # SOP — Aurora PostgreSQL Serverless v2 (ML scoring + complex reporting)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-22 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17, F-AFIE-13):** Scale-to-zero auto-pause set as dev/staging default in both §3 + §4. `serverless_v2_min_capacity` flipped from 0.5 floor → 0 (dev), 0.5 (prod). New CDK prop `serverless_v2_auto_pause_duration=Duration.seconds(300)` wired in (canonical 5-min idle window). Prod retains 0.5 ACU to avoid cold-start latency. §3.6 gotcha rewritten with the AFIE F-FIN-04 retro ($2K/yr wasted across 4 dev clusters). CDK prop names verified live via aws_cdk.aws_rds.DatabaseCluster doc. AWS doc: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html.
 **Applies to:** AWS CDK v2 (Python 3.12+) · Aurora PostgreSQL 16.x · Serverless v2 (0.5 – 8 ACU) · RDS Data API (`rds-data`) · Secrets Manager with rotation · KMS at rest · Lambda via RDS Proxy
 
 ---
@@ -89,8 +90,20 @@ def _create_aurora_serverless_v2(self, stage: str) -> None:
         readers=[
             rds.ClusterInstance.serverless_v2("Reader1", scale_with_writer=True),
         ] if stage == "prod" else [],
-        serverless_v2_min_capacity=0.5,   # scales to almost-zero between queries
+        # F-AFIE-13: scale-to-zero auto-pause is GA on Aurora Serverless v2 for
+        # Aurora MySQL + PostgreSQL (engine version dependent). For dev/staging the
+        # canonical floor is 0 ACU = auto-pause after idle; prod stays at 0.5 ACU
+        # to avoid the cold-start latency penalty. AFIE Sprint 10 F-FIN-04: ms-09
+        # paid ~$43/mo per dev cluster for dormant compute that should have been
+        # $0. AWS doc: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html
+        # Canonical CDK Python props (verified via aws_cdk.aws_rds.DatabaseCluster):
+        #   serverless_v2_min_capacity   — smallest value 0 (auto-pause) on supported engines
+        #   serverless_v2_auto_pause_duration — Duration.seconds(300..86400); default 5 min
+        serverless_v2_min_capacity=0 if stage != "prod" else 0.5,
         serverless_v2_max_capacity=8,     # caps cost at ~$1.44/hr at peak
+        serverless_v2_auto_pause_duration=(
+            Duration.seconds(300) if stage != "prod" else None
+        ),
         vpc=self.vpc,
         vpc_subnets=ec2.SubnetSelection(
             subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
@@ -430,7 +443,7 @@ def _err(code: int, msg: str):
 
 ### 3.6 Monolith gotchas
 
-- **`serverless_v2_min_capacity=0.5`** is the scale-to-near-zero floor. It does NOT auto-pause; Serverless v2 has no auto-pause (v1 did). A dormant cluster at 0.5 ACU still costs ~$43/month. For dev, consider stopping the cluster via scheduled Lambda or flipping to `serverless_v2_min_capacity=0` (Aurora Serverless v2 does allow 0 ACU scale-to-zero as of late 2024 — `# TODO(verify): CDK aws-cdk-lib support for 0 in your pinned version; fall back to 0.5 if synth rejects`).
+- **R4 / F-AFIE-13: scale-to-zero is the canonical dev default.** Aurora Serverless v2 supports `min_capacity=0` with `serverless_v2_auto_pause_duration` GA across PostgreSQL + MySQL (engine version dependent — see https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.how-it-works.html#aurora-serverless-v2.how-it-works.capacity). Dev/staging stages default to 0 ACU + 300s idle → cluster pauses to $0. Prod stays at 0.5 ACU (cold-start latency penalty unacceptable). AFIE Sprint 10 F-FIN-04: ms-09 paid ~$43/mo per dev cluster at the old 0.5 floor when 0 was available — wasted ~$2K/yr across 4 dev clusters. CDK Python prop names verified live: `serverless_v2_min_capacity` (Union[int,float]) + `serverless_v2_auto_pause_duration: Duration`.
 - **Data API has a 100 KB payload cap** per `execute_statement` request and a 45-second statement timeout. Long reports → use Proxy instead.
 - **`enable_data_api=True`** must be set on the cluster. Forgetting it manifests as `BadRequestException: ... Data API is not enabled for this cluster` at query time, not at synth.
 - **`rds-data:*` is not the same as `rds-db:connect`.** Data API permissions are on the CLUSTER ARN; `rds-db:connect` is on a DB resource ARN (`arn:aws:rds-db:region:account:dbuser:cluster-XXXX/username`).
@@ -486,8 +499,12 @@ class AuroraServerlessV2Stack(cdk.Stack):
         vpc: ec2.IVpc,
         rds_sg: ec2.ISecurityGroup,
         permission_boundary: iam.IManagedPolicy,
-        min_acu: float = 0.5,
+        # F-AFIE-13: default min_acu flipped 0.5 → 0 (auto-pause on idle). Override
+        # to 0.5 ONLY for stages that can't tolerate ~10s cold-start latency.
+        min_acu: float = 0.0,
         max_acu: float = 8.0,
+        # Auto-pause window: 300s = AWS canonical default. Range 300..86400.
+        auto_pause_seconds: int = 300,
         **kwargs,
     ) -> None:
         super().__init__(scope, f"{{project_name}}-database-{stage_name}", **kwargs)
@@ -524,6 +541,10 @@ class AuroraServerlessV2Stack(cdk.Stack):
             ),
             serverless_v2_min_capacity=min_acu,
             serverless_v2_max_capacity=max_acu,
+            # F-AFIE-13: auto-pause honored only when min_acu==0; otherwise ignored
+            serverless_v2_auto_pause_duration=(
+                Duration.seconds(auto_pause_seconds) if min_acu == 0 else None
+            ),
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(
                 subnet_type=ec2.SubnetType.PRIVATE_ISOLATED

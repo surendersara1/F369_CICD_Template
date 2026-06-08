@@ -1,6 +1,7 @@
 # SOP — CloudFront Foundation (distribution · OAC · cache behaviors · custom error pages · WAF · Shield · multi-origin)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-27 · **Status:** Active
+**Version:** 2.1 · **Last-reviewed:** 2026-06-17 · **Status:** Active
+**R4 update (2026-06-17):** Added §3.0 TLS pick-one-path decision tree (Path A edge-only vs Path B end-to-end) + AFIE G-NEW-05 retro inline + synth-time guard reference + reinforced us-east-1 region pin reminder. ACM cert + WAFv2 CLOUDFRONT-scope WebACL must be in us-east-1; CdnStack must be instantiated with `env=Environment(region="us-east-1")`. AWS docs: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html, https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html.
 **Applies to:** AWS CDK v2 (Python 3.12+) · CloudFront distribution · Origin Access Control (OAC, replaces OAI) · Cache behaviors (path-pattern based) · Cache policies + Origin Request policies + Response Headers policies · Custom error pages · WAF v2 (CLOUDFRONT scope) · Shield Standard + Shield Advanced · Real-time logs · Origin groups (multi-origin failover) · ACM (us-east-1)
 
 ---
@@ -59,6 +60,21 @@ Edge compute?
 ---
 
 ## 3. S3 + OAC variant — static site with CloudFront
+
+### 3.0 TLS path — pick ONE, never both (R4 mandate from AFIE G-NEW-05)
+
+CloudFront + ALB consumers must pick **exactly one** TLS termination path. Enabling both simultaneously breaks production:
+
+| Path | Where TLS terminates | When to use | What MUST be off |
+|---|---|---|---|
+| **A — Edge-only TLS** (CANONICAL for static + API edge) | At the CloudFront viewer cert; CloudFront → origin can be HTTP if origin is private | Static sites, S3+OAC, internal ALB behind CloudFront-only ingress | ALB listener cert + HTTPS redirect (CloudFront origin pulls over port 80 with no redirect chain) |
+| **B — End-to-end TLS** | At the ALB cert; CloudFront → ALB uses HTTPS origin protocol | Public ALB with multiple ingress paths (CloudFront + direct) | None — but CloudFront origin policy MUST use `OriginProtocolPolicy.HTTPS_ONLY` + correct SNI |
+
+**Why this matters (AFIE G-NEW-05 retro):** AFIE-CPG Sprint 11 attempted Path A AND attached an ALB ACM cert with HTTP→HTTPS listener redirect. CloudFront's port-80 origin fetch hit the ALB's `301 Moved Permanently → https://`, the CloudFront origin policy was `HTTP_ONLY`, and the redirect chain failed at the edge (502 Bad Gateway intermittent). Fix: drop the ALB listener cert + redirect OR switch CloudFront `OriginProtocolPolicy` to `HTTPS_ONLY` + match the ALB cert SNI.
+
+**Synth-time guard (canonical):** see `_assertions/cdk_synth_guards.md` rule `assert_cloudfront_tls_path_single` (forthcoming under F-AFIE-22) — fails synth if BOTH an ALB `Certificate` and a CloudFront `Distribution` referencing that ALB-origin coexist with an HTTP-only origin policy.
+
+**Region pin reminder:** every resource in this stack — ACM cert, WAFv2 CLOUDFRONT-scope WebACL — MUST be created in `us-east-1`. The `CdnStack` below enforces this via the stack-region prop; `infra/bin/<app>.py` MUST instantiate it with `env=Environment(region="us-east-1")`. AWS doc: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html#https-requirements-aws-region.
 
 ### 3.1 CDK
 

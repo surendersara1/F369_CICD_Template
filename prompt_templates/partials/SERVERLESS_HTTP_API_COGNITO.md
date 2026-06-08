@@ -1,6 +1,8 @@
 # SOP — API Gateway HTTP API + Cognito (JWT authorizer · Lambda integration · CORS · throttling · custom domain)
 
-**Version:** 2.0 · **Last-reviewed:** 2026-04-26 · **Status:** Active
+**Version:** 2.2 · **Last-reviewed:** 2026-06-17 · **Status:** Active (CANONICAL for HTTP API + JWT-authorizer-by-default pattern)
+**R4 update (2026-06-17, Tier 7 sweep — F-AFIE-21):** 3 sites migrated `advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED` → `feature_plan=cognito.FeaturePlan.PLUS` (line 125 CDK, line 422 gotcha, line 490 non-negotiable #1). Aligns with `AGENTCORE_IDENTITY.md` §3.3 (F-AFIE-21).
+**R4 update (2026-06-16):** Added inline doc comment explaining the `default_authorizer=jwt_authorizer` pattern as canonical (every route auth-by-default; opt-out per-route with HttpNoneAuthorizer). This is the structural fix for AFIE Sprint 8 F-INT-01 — the REST-API variant in LAYER_API §4 needed the analogous `default_method_options` fix in the same R4 wave. AWS doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html
 **Applies to:** AWS CDK v2 (Python 3.12+) · API Gateway v2 (HTTP API) · Cognito User Pool + Identity Pool · JWT authorizer · Lambda proxy integration · CORS · Custom domain via Route 53 + ACM · WAF v2 · throttling
 
 ---
@@ -121,7 +123,9 @@ class ApiStack(Stack):
             account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
             mfa=cognito.Mfa.OPTIONAL,             # OPTIONAL or REQUIRED for prod
             mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
-            advanced_security_mode=cognito.AdvancedSecurityMode.ENFORCED,
+            # F-AFIE-21: advanced_security_mode is DEPRECATED — use feature_plan=PLUS.
+            # See AGENTCORE_IDENTITY.md §3.3.
+            feature_plan=cognito.FeaturePlan.PLUS,
             user_invitation=cognito.UserInvitationConfig(
                 email_subject="Welcome",
                 email_body="Your temp password is {####}. Sign in at https://app.example.com",
@@ -203,6 +207,11 @@ class ApiStack(Stack):
         )
 
         # ── 5. HTTP API ──────────────────────────────────────────────
+        # CANONICAL pattern: set `default_authorizer` at the HttpApi level so EVERY route
+        # gets the JWT check unless it explicitly opts out (see /healthz below using
+        # HttpNoneAuthorizer). Without this, routes added later default to NO auth —
+        # this was AFIE-CPG Sprint 8 F-INT-01 in the REST-API variant (LAYER_API §4).
+        # AWS doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html
         self.api = apigwv2.HttpApi(self, "HttpApi",
             api_name=f"{env_name}-app-api",
             cors_preflight=apigwv2.CorsPreflightOptions(
@@ -413,7 +422,7 @@ lambda_auth = apigwv2_auth.HttpLambdaAuthorizer(
 - **Stage-level access logs require explicit log group + format**. Without it, you get nothing in CW Logs.
 - **HTTP API throttling is BURST + RATE per route, not per usage plan.** No quota concept (vs REST API). For per-customer quotas, enforce in Lambda + DDB.
 - **Cognito user pool deletion is permanent** — `RemovalPolicy.RETAIN` is mandatory in prod. Lost user pool = lost users.
-- **Cognito `advanced_security_mode: ENFORCED` adds $0.05/MAU** but blocks compromised credential attacks. Worth it for prod.
+- **Cognito `feature_plan=PLUS` adds ~$0.05/MAU** but blocks compromised credentials + adaptive auth + threat-protection logs. Worth it for prod. (Replaces the deprecated `advanced_security_mode=ENFORCED` per F-AFIE-21.)
 - **`generate_secret: true` on app client + SPA = leaked secret in browser.** Always `false` for browser/mobile clients.
 - **JWT in `Authorization: Bearer <token>` header** — HTTP API expects exactly this format. Custom header names = config drift.
 - **Cognito hosted UI domain prefix is account-globally-unique.** Use env-prefix to avoid conflicts.
@@ -481,7 +490,7 @@ def test_rate_limit_kicks_in():
 
 ## 7. Five non-negotiables
 
-1. **Cognito `advanced_security_mode: ENFORCED`** + MFA optional or required.
+1. **Cognito `feature_plan=cognito.FeaturePlan.PLUS`** (R4 / F-AFIE-21 — replaces deprecated `advanced_security_mode=ENFORCED`) + MFA optional or required.
 2. **`disable_execute_api_endpoint: true`** + custom domain only.
 3. **WAF v2 with rate limit + AWSManagedRulesCommonRuleSet** on stage.
 4. **Stage-level access logs** to KMS-encrypted CW Log Group; structured JSON; correlation ID + Cognito sub claim.
