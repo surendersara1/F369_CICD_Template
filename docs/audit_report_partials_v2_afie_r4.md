@@ -50,7 +50,7 @@ The grade is the **R4 verdict** after the R4 fix has been applied. Each row will
 | 12 | DATA_OPENSEARCH_SERVERLESS | UNAUDITED (R12) | F-AFIE-10 (AllowFromPublic flipped True→False; source_vpce_ids required for non-dev; synth-time assert) ✓ | PASS |
 | 13 | ENTERPRISE_SECURITY_HUB_GD_ORG | UNAUDITED (R11) | F-AFIE-11 (§3.3 NEW post-deploy verify_security_baseline.py covering all 6 detective controls + §6 non-negotiable #6) ✓ | PASS |
 | 14 | AGENTCORE_GATEWAY | PASS (R2) | F-AFIE-12 (tag-condition added to lambda:InvokeFunction + policy-engine/* + gateway/* grants in §3 + §4; gotcha codified) ✓ | PASS |
-| 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (scale-to-zero default) | TBD |
+| 15 | DATA_AURORA_SERVERLESS_V2 | PASS (R2) | F-AFIE-13 (min_capacity dev default 0.5→0; serverless_v2_auto_pause_duration=300s; prod retains 0.5 for cold-start; both §3 + §4) ✓ | PASS |
 | 16 | DATA_DBT_REDSHIFT_SERVERLESS (or new) | TBD | F-AFIE-14 (4 RPU base) | TBD |
 | 17 | ECS_PRODUCTION_HARDENING | UNAUDITED (R16) | F-AFIE-15 (Fargate Spot for dev) | TBD |
 | 18 | LAYER_BACKEND_ECS | PASS (R1) | F-AFIE-15 (Spot pattern cross-ref) | TBD |
@@ -510,7 +510,43 @@ The function-name prefix is a *naming convention* not a *security boundary*. A t
 
 ---
 
-### Finding F-AFIE-13 through F-AFIE-25 — TBD (populated per Tier as fixes land)
+### Finding F-AFIE-13 — MED (Aurora Serverless v2 scale-to-zero default) — RESOLVED 2026-06-17
+**Partial fixed:** `DATA_AURORA_SERVERLESS_V2.md` §3.2 + §4.2 + §3.6
+
+**Issue (from AFIE Sprint 10 F-FIN-04 MED):** Canonical partial set `serverless_v2_min_capacity=0.5` as the default in both §3 and §4. A dormant cluster at 0.5 ACU costs ~$43/month. ms-09 ran 4 dev/staging clusters at this floor for ~12 months → wasted ~$2K/yr that should have been zero. The §3.6 gotcha hinted at the 0-ACU option but flagged it as TODO-verify rather than the canonical default.
+
+**Evidence (verified live this session via MCP):**
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html — confirms scale-to-zero auto-pause is GA on both Aurora MySQL and PostgreSQL (engine version dependent), with `min_capacity=0` as the trigger.
+- `mcp__awslabs_aws-documentation-mcp-server__read_documentation` → https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_rds/DatabaseCluster.html (start_index 16000) — confirms canonical CDK Python prop names:
+  - `serverless_v2_min_capacity: Union[int, float, None]` — smallest value 0 (for auto-pause-supporting engine versions)
+  - `serverless_v2_auto_pause_duration: Optional[Duration]` — must be `Duration.seconds(300..86400)`; default 300 (5 min)
+- CFN underlying property: `ServerlessV2ScalingConfiguration.SecondsUntilAutoPause` (confirmed via https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-rds-dbcluster-serverlessv2scalingconfiguration.html).
+
+**Fix applied:**
+
+1. **§3.2 Monolith** — `serverless_v2_min_capacity` switched to stage-conditional: `0 if stage != "prod" else 0.5`. Added `serverless_v2_auto_pause_duration=Duration.seconds(300) if stage != "prod" else None`. Inline AFIE F-FIN-04 retro comment + AWS doc URL + CDK prop verification note.
+
+2. **§4.2 Micro-Stack `AuroraServerlessV2Stack.__init__()`** — constructor signature flipped:
+   - `min_acu: float = 0.5` → `min_acu: float = 0.0` (default scale-to-zero)
+   - Added `auto_pause_seconds: int = 300` parameter
+   - Cluster construction now wires `serverless_v2_auto_pause_duration=Duration.seconds(auto_pause_seconds) if min_acu == 0 else None` (auto-pause only honored when min is zero)
+
+3. **§3.6 gotcha** — rewrote the misleading "no auto-pause" warning with the canonical 0-ACU pattern + AFIE F-FIN-04 retro + verified CDK prop names.
+
+**Header bumped:** DATA_AURORA_SERVERLESS_V2 2.0 → 2.1.
+
+**Recommended next steps (deferred to F-AFIE-22):** `assert_aurora_dev_min_capacity_is_zero` — fails synth if compliance_class in {dev, staging} and any DatabaseCluster has `serverless_v2_min_capacity > 0`.
+
+**MCP audit sources:**
+- https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html — feature overview, prerequisites (read 2026-06-17)
+- https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_rds/DatabaseCluster.html — canonical CDK Python prop names (read 2026-06-17, start_index 16000)
+- https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-rds-dbcluster-serverlessv2scalingconfiguration.html — underlying CFN property (read 2026-06-17)
+
+**grep -r sweep (deferred to Tier 8):** scan for `serverless_v2_min_capacity=0.5` in any partial/kit/composite; flag for the per-stage conditional.
+
+---
+
+### Finding F-AFIE-14 through F-AFIE-25 — TBD (populated per Tier as fixes land)
 
 Each subsequent finding follows the same R-format: Partial, Section, Issue (with AFIE source ID), Evidence (with live MCP citation), Recommended fix, MCP audit sources, grep -r sweep.
 
@@ -709,4 +745,44 @@ Populated as Tier 1-4 fixes ship.
                   (MISSING → INSUFFICIENT_DATA, no SNS action fires)
    result rank 5: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Edit-CloudWatch-Alarm.html
    findings backed: F-AFIE-07 (mandatory treat_missing_data + semantic decision table)
+```
+
+---
+
+### Hour 22 — F-AFIE-13 MCP citations
+
+```
+[22:00] mcp__awslabs_aws-documentation-mcp-server__search_documentation
+   query: "Aurora Serverless v2 scale to zero minimum ACU auto-pause"
+   search_intent: Confirm Aurora Serverless v2 min_capacity=0 is GA + canonical config
+   result rank 1: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html
+   findings backed: F-AFIE-13 (scale-to-zero default in §3 + §4)
+
+[22:10] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html
+   max_length: 5000 (Overview + Prerequisites sections retrieved)
+   key passage: "To enable the auto-pause behavior for all the Aurora serverless DB
+                 instances in an Aurora cluster, you set the minimum capacity value
+                 for the cluster to zero ACUs."
+   findings backed: F-AFIE-13 (canonical trigger min_capacity=0)
+
+[22:20] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-rds-dbcluster-serverlessv2scalingconfiguration.html
+   max_length: 3000
+   key passage: ServerlessV2ScalingConfiguration property type:
+                  { MaxCapacity: Number, MinCapacity: Number, SecondsUntilAutoPause: Integer }
+                Valid for: Aurora Serverless v2 DB clusters
+   findings backed: F-AFIE-13 (canonical CFN underlying property SecondsUntilAutoPause)
+
+[22:30] mcp__awslabs_aws-documentation-mcp-server__read_documentation
+   url: https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_rds/DatabaseCluster.html
+   max_length: 2500 + 2500 (start_index 8000, 13500, 16000 retrieved)
+   key passage (start_index 16000):
+     serverless_v2_auto_pause_duration: Optional[Duration]
+       — duration between 300 seconds (5 minutes) and 86,400 seconds (24 hours)
+       — Default: 300 seconds (5 minutes)
+     serverless_v2_min_capacity: Union[int, float, None]
+       — smallest value 0 for engine versions that support Aurora Serverless v2 auto-pause
+       — Default: 0.5
+   findings backed: F-AFIE-13 (verified Python prop names before writing CDK code)
 ```
